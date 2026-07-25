@@ -17,15 +17,25 @@ Claude Code transcripts; nothing leaves the machine, no credentials are touched.
 
 ## Run
 
-```bash
-node src/server.mjs
-```
-
-Then open <http://localhost:4478>. For always-on:
+Always-on (recommended) — runs at login, restarts if it dies:
 
 ```bash
 scripts/install-launchagent.sh
 ```
+
+Then just open <http://localhost:4478>.
+
+Desktop shortcut (no Terminal window; opens the dashboard, and starts the
+server first if it isn't answering):
+
+```bash
+scripts/make-desktop-shortcut.sh              # -> ~/Desktop
+scripts/make-desktop-shortcut.sh /Applications
+scripts/make-desktop-shortcut.sh --uninstall
+```
+
+Manual, or as a fallback: `node src/server.mjs`, or double-click
+`Open Claude Budget.command`.
 
 ## Why it works the way it does
 
