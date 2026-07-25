@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "claude-budget",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["src/server.mjs"],
+      "port": 4478
+    }
+  ]
+}

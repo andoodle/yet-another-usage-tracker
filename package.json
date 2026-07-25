@@ -1,0 +1,13 @@
+{
+  "name": "claude-budget",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Weekly Claude usage pacing dashboard, built from local Claude Code transcripts.",
+  "scripts": {
+    "start": "node src/server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
