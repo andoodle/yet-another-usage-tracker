@@ -16,20 +16,34 @@
         <button id="refresh" class="ghost" type="button">Rescan</button>
       </header>
 
+      <div class="pools" id="pools" role="tablist"></div>
+
       <section class="hero">
-        <div class="gauge">
-          <div class="gauge-label">Today's allowance</div>
-          <div class="gauge-value"><span id="today-spent">—</span><span class="of" id="today-allow"></span></div>
-          <div class="meter"><div class="meter-fill" id="today-meter"></div></div>
-          <div class="verdict" id="verdict">—</div>
+        <div class="gauges">
+          <div class="gauge">
+            <div class="gauge-label">Today's allowance</div>
+            <div class="gauge-value"><span id="today-spent">—</span><span class="of" id="today-allow"></span></div>
+            <div class="meter"><div class="meter-fill" id="today-meter"></div></div>
+            <div class="verdict" id="verdict">—</div>
+          </div>
+
+          <div class="gauge">
+            <div class="gauge-label">Weekly allowance</div>
+            <div class="gauge-value"><span id="week-value">—</span><span class="of" id="week-sub"></span></div>
+            <div class="meter">
+              <div class="meter-fill" id="week-meter"></div>
+              <div class="pace-mark" id="week-pace" hidden></div>
+            </div>
+            <div class="verdict" id="week-verdict">—</div>
+          </div>
         </div>
 
         <dl class="stats">
-          <div><dt>Week used</dt><dd id="week-spent">—</dd></div>
-          <div><dt>Week left</dt><dd id="week-remaining">—</dd></div>
           <div><dt>Running balance</dt><dd id="debt">—</dd></div>
           <div><dt>Reserve</dt><dd id="reserve">—</dd></div>
           <div><dt>5-hour block</dt><dd id="block-spent">—</dd></div>
+          <div><dt>Days left</dt><dd id="days-left">—</dd></div>
+          <div hidden><dt>Also bound by</dt><dd id="binding">—</dd></div>
           <div><dt>Limit estimate</dt><dd id="capacity-source" class="small">—</dd></div>
         </dl>
       </section>
@@ -60,12 +74,29 @@
             <option value="6">Saturday</option>
           </select>
           at
-          <input id="week-hour" type="number" min="0" max="23" step="1" />:00
+          <input id="week-time" type="time" step="60" />
         </label>
-        <label title="Run /usage in Claude Code, read the weekly percentage, and type it here. The tool solves for your real limit from it. Set to 0 to go back to inferring.">
-          Calibrate — <code>/usage</code> says I'm at
-          <input id="cal-pct" type="number" min="0" max="100" step="1" placeholder="%" />
+        <label title="Run /usage in Claude Code, read this pool's weekly percentage, and type it here. The tool solves for the real limit. Set to 0 to go back to inferring.">
+          Calibrate <b id="cal-pool-label">—</b> — <code>/usage</code> says
+          <input id="cal-pct" type="number" min="0" max="100" step="1" placeholder="%" autocomplete="off" />
           % this week
+        </label>
+
+        <label title="Share of the weekly allowance held back and released near the end of the week to pay down overspend.">
+          Reserve
+          <input id="reserve-pct" type="range" min="0" max="40" step="1" />
+          <output id="reserve-out" class="mono">—</output>
+        </label>
+
+        <label title="How many days must remain before the reserve unlocks.">
+          Release with
+          <input id="reserve-days" type="number" min="0" max="7" step="1" autocomplete="off" />
+          days left
+        </label>
+
+        <label title="The clock time your current 5-hour block resets, as shown by /usage. Pins the block chain, which can't be reconstructed reliably from transcripts alone.">
+          5h block resets at
+          <input id="block-reset" type="time" step="60" autocomplete="off" />
         </label>
       </section>
 

@@ -3,8 +3,10 @@ const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MAX_WEIGHT = 2
 const STEP = 0.1
 
-let state = null
-let dragging = null // { date, el } while a gesture is live
+let all = null // full API payload: { pools, poolMeta, plan, fileCount }
+let state = null // the currently selected pool's view
+let pool = 'all'
+let dragging = null // { date, weight } while a gesture is live
 const cells = new Map() // date -> { el, avail, spent, name, amt, label }
 
 // Everything is expressed as a share of the WEEKLY ALLOWANCE. The underlying
@@ -56,10 +58,62 @@ async function patchPlan(patch) {
 }
 
 function apply(next) {
-  state = next
+  all = next
+  if (!all.pools[pool]) pool = 'all'
+  state = { ...all.pools[pool], plan: all.plan, fileCount: all.fileCount }
+  paintPools()
   paintSummary()
   syncWeekDom()
   paintWeek()
+}
+
+/** Tabs, each showing its own week % so both meters are visible at a glance. */
+function paintPools() {
+  const host = $('pools')
+  host.textContent = ''
+  for (const [id, meta] of Object.entries(all.poolMeta)) {
+    const s = all.pools[id]
+    const cap = s.capacity.weeklyUsd
+    const used = cap ? (s.week.spent / cap) * 100 : null
+
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'pool' + (id === pool ? ' active' : '')
+    btn.setAttribute('role', 'tab')
+    btn.setAttribute('aria-selected', String(id === pool))
+
+    const name = document.createElement('span')
+    name.className = 'pool-name'
+    name.textContent = meta.label
+
+    const val = document.createElement('span')
+    val.className = 'pool-val'
+    val.textContent = used == null ? '—' : `${Math.round(used)}%`
+    if (used != null && used >= 90) val.classList.add('bad')
+    else if (used != null && used >= 75) val.classList.add('warn')
+
+    const sub = document.createElement('span')
+    sub.className = 'pool-sub'
+    if (meta.kind === 'sublimit') {
+      // Show the share this cap ACTUALLY represents. Once calibrated it can
+      // differ from the assumed default, and printing the assumption would
+      // contradict the number right above it.
+      const overallCap = s.overall?.capacity
+      const share = overallCap && cap ? cap / overallCap : (s.overall?.share ?? null)
+      sub.textContent = share
+        ? `capped at ${Math.round(share * 100)}% of the week`
+        : 'sub-limit of the weekly total'
+    } else {
+      sub.textContent = 'full weekly limit'
+    }
+
+    btn.append(name, val, sub)
+    btn.addEventListener('click', () => {
+      pool = id
+      apply(all)
+    })
+    host.append(btn)
+  }
 }
 
 function verdictFor(pct) {
@@ -70,6 +124,73 @@ function verdictFor(pct) {
   if (pct < 0.95) return [`${p}% of today's share used — on pace.`, 'warn']
   if (pct < 1.4) return [`${p}% of today's share — borrowing from later in the week.`, 'warn']
   return [`${p}% of today's share — well over.`, 'bad']
+}
+
+/** Weekly gauge — same shape as the daily one, but paced against the plan. */
+function paintWeekGauge() {
+  const cap = capacityUnits()
+  const used = cap ? state.week.spent / cap : null
+
+  $('week-value').textContent = used == null ? '—' : `${Math.min(999, Math.round(used * 100))}%`
+
+  const reset = new Date(state.week.end)
+  const resetLabel = reset.toLocaleString(undefined, {
+    weekday: 'short',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+  $('week-sub').textContent =
+    used == null ? '' : `of weekly allowance · resets ${resetLabel}`
+
+  const meter = $('week-meter')
+  meter.style.width = `${Math.min(100, (used ?? 0) * 100)}%`
+
+  // Where the plan says you should be right now. The gap between the fill and
+  // this mark IS the running balance, made visual.
+  const expected = cap && state.week.expected != null ? state.week.expected / cap : null
+  const mark = $('week-pace')
+  if (expected == null) {
+    mark.hidden = true
+  } else {
+    mark.hidden = false
+    mark.style.left = `${Math.min(100, expected * 100)}%`
+  }
+
+  const ratio = expected > 0 ? used / expected : null
+  meter.style.background =
+    ratio == null
+      ? 'var(--muted)'
+      : ratio <= 1.02
+        ? 'var(--good)'
+        : ratio <= 1.25
+          ? 'var(--warn)'
+          : 'var(--bad)'
+
+  const el = $('week-verdict')
+  if (used == null || ratio == null) {
+    el.textContent = 'Not enough history to pace yet.'
+    el.className = 'verdict'
+    return
+  }
+  const left = Math.max(0, 100 - used * 100)
+  const dl = state.week.daysLeft
+  const dayWord = dl === 1 ? 'day' : 'days'
+  // Language is deliberately consistent with the Running balance stat:
+  // burning faster than planned is always "over plan", never "ahead".
+  const off = Math.round(Math.abs(ratio - 1) * 100)
+  if (ratio <= 1.02) {
+    el.textContent =
+      ratio < 0.9
+        ? `${off}% under plan — ${left.toFixed(0)}% left for the final ${dl} ${dayWord}.`
+        : `On plan — ${left.toFixed(0)}% left for the final ${dl} ${dayWord}.`
+    el.className = 'verdict good'
+  } else if (ratio <= 1.25) {
+    el.textContent = `${off}% over plan — ${left.toFixed(0)}% left for ${dl} ${dayWord}.`
+    el.className = 'verdict warn'
+  } else {
+    el.textContent = `${off}% over plan — only ${left.toFixed(0)}% left for ${dl} ${dayWord}.`
+    el.className = 'verdict bad'
+  }
 }
 
 function paintSummary() {
@@ -95,8 +216,7 @@ function paintSummary() {
   $('verdict').textContent = text
   $('verdict').className = `verdict ${cls}`
 
-  $('week-spent').textContent = pct(state.week.spent)
-  $('week-remaining').textContent = pct(state.remaining)
+  paintWeekGauge()
 
   // Debt / reserve — the two halves of the hybrid policy, stated explicitly.
   const debtEl = $('debt')
@@ -104,10 +224,10 @@ function paintSummary() {
     debtEl.textContent = '—'
     debtEl.className = ''
   } else if (state.debt > 0) {
-    debtEl.textContent = `${signedPct(-state.debt)} behind plan`
+    debtEl.textContent = `${pct(state.debt)} over plan`
     debtEl.className = 'bad'
   } else {
-    debtEl.textContent = `${signedPct(-state.debt)} ahead of plan`
+    debtEl.textContent = `${pct(-state.debt)} under plan`
     debtEl.className = 'good'
   }
 
@@ -115,10 +235,27 @@ function paintSummary() {
     ? `${pct(state.reserve.total)} ${state.reserve.released ? 'released' : 'held back'}`
     : '—'
 
+  // The 5-hour limit has its OWN capacity — showing it as a slice of the
+  // weekly allowance would be a different limit's number.
   const blk = state.block
-  $('block-spent').textContent = blk?.open
-    ? `${pct(blk.spent)} · resets ${new Date(blk.endsAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
-    : 'none open'
+  if (!blk?.open) {
+    $('block-spent').textContent = 'none open'
+    $('block-spent').className = ''
+  } else {
+    const bp = blk.pct == null ? null : blk.pct * 100
+    const ends = new Date(blk.endsAt)
+    const mins = Math.max(0, Math.round((ends - new Date()) / 60000))
+    const rem = mins >= 60 ? `${Math.floor(mins / 60)}h${String(mins % 60).padStart(2, '0')}m` : `${mins}m`
+    $('block-spent').textContent =
+      `${bp == null ? '—' : Math.round(bp) + '%'} · resets in ${rem}${blk.anchored ? '' : ' (est)'}`
+    $('block-spent').className = bp == null ? '' : bp >= 90 ? 'bad' : bp >= 75 ? 'warn' : ''
+  }
+
+  if (document.activeElement !== $('block-reset')) {
+    $('block-reset').value = blk?.endsAt
+      ? `${String(new Date(blk.endsAt).getHours()).padStart(2, '0')}:${String(new Date(blk.endsAt).getMinutes()).padStart(2, '0')}`
+      : ''
+  }
 
   const src = state.capacity.source
   $('capacity-source').textContent =
@@ -126,12 +263,39 @@ function paintSummary() {
       ? `pinned by ${state.capacity.pins} real limit hit${state.capacity.pins > 1 ? 's' : ''}`
       : src === 'manual'
         ? 'set by you'
-        : src === 'history'
-          ? 'heaviest rolling 7 days + 15%'
-          : 'unknown — no history yet'
+        : src === 'derived'
+          ? `${Math.round((state.overall?.share ?? 0.5) * 100)}% of the overall limit`
+          : src === 'history'
+            ? 'heaviest rolling 7 days + 15%'
+            : 'unknown — no history yet'
+
+  // On the Fable meter, the week total is the other thing that can stop you.
+  const bindEl = $('binding')
+  if (state.overall && state.overall.capacity) {
+    const overallUsed = (state.overall.spent / state.overall.capacity) * 100
+    bindEl.parentElement.hidden = false
+    bindEl.textContent = `${Math.round(overallUsed)}% of week used overall`
+    bindEl.className = overallUsed >= 90 ? 'bad' : overallUsed >= 75 ? 'warn' : ''
+  } else {
+    bindEl.parentElement.hidden = true
+  }
+
+  $('cal-pool-label').textContent = all.poolMeta[pool].label
+
+  const rf = Math.round((state.plan.reserveFraction ?? 0) * 100)
+  if (document.activeElement !== $('reserve-pct')) $('reserve-pct').value = String(rf)
+  $('reserve-out').textContent = `${rf}%`
+  if (document.activeElement !== $('reserve-days')) {
+    $('reserve-days').value = String(state.plan.reserveReleaseDays ?? 2)
+  }
+
+  $('days-left').textContent = `${state.week.daysLeft}`
 
   $('week-dow').value = String(state.plan.weekStart.dow)
-  $('week-hour').value = String(state.plan.weekStart.hour)
+  const p2 = (n) => String(n).padStart(2, '0')
+  if (document.activeElement !== $('week-time')) {
+    $('week-time').value = `${p2(state.plan.weekStart.hour)}:${p2(state.plan.weekStart.minute || 0)}`
+  }
   if (document.activeElement !== $('cal-pct')) {
     $('cal-pct').value =
       state.plan.capacity.mode === 'manual' && capacityUnits()
@@ -309,17 +473,48 @@ function attachDrag(track, date) {
 }
 
 $('refresh').addEventListener('click', () => load(true))
-$('week-dow').addEventListener('change', (e) =>
-  patchPlan({ weekStart: { ...state.plan.weekStart, dow: Number(e.target.value) } }),
-)
-$('week-hour').addEventListener('change', (e) =>
-  patchPlan({ weekStart: { ...state.plan.weekStart, hour: Number(e.target.value) } }),
-)
-$('cal-pct').addEventListener('change', (e) => {
-  const v = e.target.value === '' ? null : Number(e.target.value)
-  if (v == null) return
-  patchPlan({ calibratePct: v })
-})
 
-load()
+/**
+ * Settings listeners are wired only AFTER the first state has loaded and the
+ * controls have been populated from it.
+ *
+ * Wiring them at parse time is a data-loss bug: browsers restore previously
+ * entered form values on reload and fire `change` for them. Those events are
+ * indistinguishable from real input (they're trusted), so a plain reload would
+ * silently POST stale values and rewrite the saved plan.
+ */
+function wireSettings() {
+  $('week-dow').addEventListener('change', (e) =>
+    patchPlan({ weekStart: { ...state.plan.weekStart, dow: Number(e.target.value) } }),
+  )
+  $('week-time').addEventListener('change', (e) => {
+    const [h, m] = e.target.value.split(':').map(Number)
+    if (Number.isNaN(h)) return
+    patchPlan({ weekStart: { ...state.plan.weekStart, hour: h, minute: m || 0 } })
+  })
+  $('cal-pct').addEventListener('change', (e) => {
+    if (e.target.value === '') return
+    patchPlan({ calibratePct: Number(e.target.value), calibratePool: pool })
+  })
+  $('reserve-pct').addEventListener('input', (e) => {
+    $('reserve-out').textContent = `${e.target.value}%`
+  })
+  $('reserve-pct').addEventListener('change', (e) =>
+    patchPlan({ reserveFraction: Number(e.target.value) / 100 }),
+  )
+  $('reserve-days').addEventListener('change', (e) =>
+    patchPlan({ reserveReleaseDays: Number(e.target.value) }),
+  )
+  $('block-reset').addEventListener('change', (e) => {
+    if (!e.target.value) return patchPlan({ blockAnchor: null })
+    const [h, m] = e.target.value.split(':').map(Number)
+    // Interpret as the next occurrence of that clock time.
+    const d = new Date()
+    d.setHours(h, m || 0, 0, 0)
+    if (d <= new Date()) d.setDate(d.getDate() + 1)
+    patchPlan({ blockAnchor: d.toISOString() })
+  })
+}
+
+load().then(wireSettings)
 setInterval(() => { if (!dragging) load() }, 60_000)

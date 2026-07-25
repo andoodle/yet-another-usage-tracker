@@ -5,10 +5,26 @@ import { DATA_DIR } from './scan.mjs'
 const PLAN_FILE = path.join(DATA_DIR, 'plan.json')
 
 export const DEFAULT_PLAN = {
-  // Which weekday + hour the weekly limit rolls over on (0 = Sunday).
-  weekStart: { dow: 1, hour: 0 },
-  // 'auto' infers capacity from your own history; 'manual' uses weeklyUsd.
-  capacity: { mode: 'auto', weeklyUsd: null },
+  // Exact moment the weekly limit rolls over (0 = Sunday). Minutes matter —
+  // real reset anchors are wall-clock times like Wed 15:45, not round hours.
+  weekStart: { dow: 1, hour: 0, minute: 0 },
+  // 'auto' infers from your own history; 'manual' uses weeklyUsd.
+  // `fable` is normally DERIVED as fableShare × the overall limit, since it is
+  // a sub-limit of the same budget rather than an independent allowance.
+  capacity: {
+    all: { mode: 'auto', weeklyUsd: null },
+    fable: { mode: 'auto', weeklyUsd: null },
+    // The 5-hour session limit is a DIFFERENT limit, not a slice of the week.
+    // It needs its own capacity or its percentage is meaningless.
+    block: { mode: 'auto', weeklyUsd: null },
+  },
+  // Share of the weekly limit usable on Fable (50% on Max at time of writing).
+  fableShare: 0.5,
+  // A known 5-hour-block reset moment (ISO). Reconstructing the block chain
+  // from transcript history alone drifts — gaps and hour bucketing move the
+  // anchor by hours. One observed reset time pins it exactly; the chain then
+  // rolls forward in 5h steps for as long as you keep working.
+  blockAnchor: null,
   // Per-weekday default availability, 0 = away, 1 = normal, 2 = heavy.
   weekdayWeights: { 0: 0.4, 1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 0.4 },
   // Date-specific overrides, "YYYY-MM-DD" -> weight. Set by dragging the calendar.
@@ -20,10 +36,29 @@ export const DEFAULT_PLAN = {
   reserveReleaseDays: 2,
 }
 
+/** Bring older plan files forward without losing calibration the user did. */
+function migrate(p) {
+  const out = { ...DEFAULT_PLAN, ...p }
+  out.weekStart = { minute: 0, ...DEFAULT_PLAN.weekStart, ...(p.weekStart || {}) }
+
+  // v1 stored one flat capacity; v2 keyed it 'standard'. Both meant the
+  // overall weekly limit, which is now 'all'. Preserve any calibration.
+  const legacy =
+    p.capacity && ('mode' in p.capacity || 'weeklyUsd' in p.capacity)
+      ? { mode: p.capacity.mode || 'auto', weeklyUsd: p.capacity.weeklyUsd ?? null }
+      : p.capacity?.standard || p.capacity?.all || null
+
+  out.capacity = {
+    all: { ...DEFAULT_PLAN.capacity.all, ...(legacy || {}) },
+    fable: { ...DEFAULT_PLAN.capacity.fable, ...(p.capacity?.fable || {}) },
+    block: { ...DEFAULT_PLAN.capacity.block, ...(p.capacity?.block || {}) },
+  }
+  return out
+}
+
 export async function loadPlan() {
   try {
-    const p = JSON.parse(await fsp.readFile(PLAN_FILE, 'utf8'))
-    return { ...DEFAULT_PLAN, ...p }
+    return migrate(JSON.parse(await fsp.readFile(PLAN_FILE, 'utf8')))
   } catch {
     return { ...DEFAULT_PLAN }
   }
@@ -31,7 +66,10 @@ export async function loadPlan() {
 
 export async function savePlan(plan) {
   await fsp.mkdir(DATA_DIR, { recursive: true })
-  const merged = { ...DEFAULT_PLAN, ...plan }
+  const merged = migrate(plan)
+  // Clamp the user-tunable knobs so a bad value can't wedge the allocator.
+  merged.reserveFraction = Math.max(0, Math.min(0.6, Number(merged.reserveFraction) || 0))
+  merged.reserveReleaseDays = Math.max(0, Math.min(7, Math.round(Number(merged.reserveReleaseDays) || 0)))
   await fsp.writeFile(PLAN_FILE, JSON.stringify(merged, null, 2))
   return merged
 }
@@ -47,7 +85,7 @@ export function dateKey(d) {
 /** Start of the weekly window containing `now`. */
 export function weekWindow(now, weekStart) {
   const start = new Date(now)
-  start.setHours(weekStart.hour, 0, 0, 0)
+  start.setHours(weekStart.hour, weekStart.minute || 0, 0, 0)
   const shift = (start.getDay() - weekStart.dow + 7) % 7
   start.setDate(start.getDate() - shift)
   if (start > now) start.setDate(start.getDate() - 7)
@@ -55,12 +93,22 @@ export function weekWindow(now, weekStart) {
   return { start, end }
 }
 
-/** Sum bucket cost over [from, to). */
-export function costBetween(buckets, from, to) {
+/**
+ * Cost of one bucket for a given meter. 'all' is the full total — Fable
+ * included, because Fable draws from the same weekly limit. 'fable' is the
+ * Fable-only subset used for its sub-limit.
+ */
+function bucketCost(b, pool) {
+  if (!pool || pool === 'all') return b.cost
+  return (b.pools && b.pools[pool]) || 0
+}
+
+/** Sum bucket cost over [from, to), optionally for a single pool. */
+export function costBetween(buckets, from, to, pool) {
   let sum = 0
   for (const [key, b] of Object.entries(buckets)) {
     const t = hourKeyToDate(key)
-    if (t >= from && t < to) sum += b.cost
+    if (t >= from && t < to) sum += bucketCost(b, pool)
   }
   return sum
 }
@@ -72,13 +120,13 @@ function hourKeyToDate(key) {
 }
 
 /** Per-day cost totals within a window, keyed "YYYY-MM-DD". */
-export function dailyTotals(buckets, from, to) {
+export function dailyTotals(buckets, from, to, pool) {
   const out = {}
   for (const [key, b] of Object.entries(buckets)) {
     const t = hourKeyToDate(key)
     if (t < from || t >= to) continue
     const k = key.split('T')[0]
-    out[k] = (out[k] || 0) + b.cost
+    out[k] = (out[k] || 0) + bucketCost(b, pool)
   }
   return out
 }
@@ -89,7 +137,7 @@ export function dailyTotals(buckets, from, to) {
  * doesn't need the true number — but this keeps the percentages honest.
  * A detected rate-limit event pins capacity exactly (see limitEvents).
  */
-export function inferCapacity(buckets, weekStart, now, limitEvents = []) {
+export function inferCapacity(buckets, weekStart, now, limitEvents = [], pool) {
   // If we caught an actual limit event, the week-to-date spend at that moment
   // IS the capacity. That is free ground truth, no manual entry required.
   const pins = []
@@ -97,7 +145,7 @@ export function inferCapacity(buckets, weekStart, now, limitEvents = []) {
     const at = new Date(ev.at)
     if (Number.isNaN(at.getTime())) continue
     const { start } = weekWindow(at, weekStart)
-    pins.push(costBetween(buckets, start, at))
+    pins.push(costBetween(buckets, start, at, pool))
   }
   if (pins.length) {
     return { weeklyUsd: Math.max(...pins), source: 'limit-event', pins: pins.length }
@@ -116,7 +164,7 @@ export function inferCapacity(buckets, weekStart, now, limitEvents = []) {
   let best = 0
   while (cursor <= now) {
     const to = new Date(Math.min(cursor.getTime() + 7 * DAY, now.getTime()))
-    const c = costBetween(buckets, cursor, to)
+    const c = costBetween(buckets, cursor, to, pool)
     if (c > best) best = c
     cursor.setDate(cursor.getDate() + 1)
   }
@@ -156,10 +204,13 @@ export function allocate({ capacity, plan, days, spentByDay, todayKey }) {
   const reserveTotal = capacity * plan.reserveFraction
   const allocatable = capacity - reserveTotal
 
-  const totalWeekWeight = days.reduce((a, d) => a + d.weight, 0)
+  // Allocation uses effWeight (user weight × in-window fraction) so partial
+  // first/last days don't get a full day's share.
+  const w = (d) => (d.effWeight != null ? d.effWeight : d.weight)
+  const totalWeekWeight = days.reduce((a, d) => a + w(d), 0)
   const baseline = {}
   for (const d of days) {
-    baseline[d.date] = totalWeekWeight > 0 ? (allocatable * d.weight) / totalWeekWeight : 0
+    baseline[d.date] = totalWeekWeight > 0 ? (allocatable * w(d)) / totalWeekWeight : 0
   }
 
   const past = days.filter((d) => d.date < todayKey)
@@ -172,10 +223,10 @@ export function allocate({ capacity, plan, days, spentByDay, todayKey }) {
   const released = remainingDays.length <= plan.reserveReleaseDays
   const adjustPool = (released ? reserveTotal : 0) - debt
 
-  const remWeight = remainingDays.reduce((a, d) => a + d.weight, 0)
+  const remWeight = remainingDays.reduce((a, d) => a + w(d), 0)
   const planned = {}
   for (const d of remainingDays) {
-    const share = remWeight > 0 ? (adjustPool * d.weight) / remWeight : 0
+    const share = remWeight > 0 ? (adjustPool * w(d)) / remWeight : 0
     planned[d.date] = Math.max(0, baseline[d.date] + share)
   }
 
@@ -200,30 +251,63 @@ export function allocate({ capacity, plan, days, spentByDay, todayKey }) {
 }
 
 /** Build the full dashboard state. */
-export function computeState({ buckets, limitEvents, plan, now = new Date() }) {
+export function computeState({ buckets, limitEvents, plan, pool = 'standard', now = new Date() }) {
   const { start, end } = weekWindow(now, plan.weekStart)
-  const spentWeek = costBetween(buckets, start, now)
+  const spentWeek = costBetween(buckets, start, now, pool)
 
-  const inferred = inferCapacity(buckets, plan.weekStart, now, limitEvents)
-  const capacity =
-    plan.capacity.mode === 'manual' && plan.capacity.weeklyUsd
-      ? { weeklyUsd: plan.capacity.weeklyUsd, source: 'manual' }
-      : inferred
+  // The overall limit is the one real quantity; Fable's cap is a share of it.
+  // Inferring Fable independently would be wrong — a week with little Fable
+  // use would "prove" a tiny Fable limit that doesn't exist.
+  const inferredAll = inferCapacity(buckets, plan.weekStart, now, limitEvents, 'all')
+  const allCfg = plan.capacity.all || { mode: 'auto', weeklyUsd: null }
+  // Resolve the overall limit ONCE. Everything else — the Fable sub-cap and
+  // the Fable meter's overall reference — must derive from this same number,
+  // or calibrating the overall limit leaves the other readouts disagreeing.
+  const allCapacity =
+    allCfg.mode === 'manual' && allCfg.weeklyUsd
+      ? { weeklyUsd: allCfg.weeklyUsd, source: 'manual' }
+      : inferredAll
+
+  const cap = plan.capacity[pool] || { mode: 'auto', weeklyUsd: null }
+  let capacity
+  if (cap.mode === 'manual' && cap.weeklyUsd) {
+    capacity = { weeklyUsd: cap.weeklyUsd, source: 'manual' }
+  } else if (pool === 'fable') {
+    capacity = allCapacity.weeklyUsd
+      ? { weeklyUsd: allCapacity.weeklyUsd * (plan.fableShare ?? 0.5), source: 'derived' }
+      : { weeklyUsd: null, source: 'unknown' }
+  } else {
+    capacity = allCapacity
+  }
 
   const remaining = capacity.weeklyUsd == null ? null : Math.max(0, capacity.weeklyUsd - spentWeek)
 
   const todayStart = new Date(now)
   todayStart.setHours(0, 0, 0, 0)
   const todayKey = dateKey(todayStart)
-  const spentToday = costBetween(buckets, todayStart, now)
-  const totals = dailyTotals(buckets, start, end)
+  const spentToday = costBetween(buckets, todayStart, now, pool)
+  const totals = dailyTotals(buckets, start, end, pool)
 
-  // Every day in the window, past and future.
+  // Every calendar day the window touches. A mid-day reset anchor (e.g. Wed
+  // 15:45) makes the first and last days PARTIAL, so each day's effective
+  // weight is scaled by how much of it actually falls inside the window.
+  // Those two fractions sum to 1, so the week still totals seven days.
   const days = []
   const wc = new Date(start)
   wc.setHours(0, 0, 0, 0)
   while (wc < end) {
-    days.push({ date: dateKey(wc), dow: wc.getDay(), weight: weightFor(plan, wc) })
+    const dayStart = new Date(wc)
+    const dayEnd = new Date(wc.getTime() + DAY)
+    const overlap =
+      (Math.min(dayEnd.getTime(), end.getTime()) - Math.max(dayStart.getTime(), start.getTime())) / DAY
+    const weight = weightFor(plan, wc)
+    days.push({
+      date: dateKey(wc),
+      dow: wc.getDay(),
+      weight, // what the user set — drives the drag UI
+      partial: overlap < 0.999,
+      effWeight: weight * Math.max(0, Math.min(1, overlap)), // what allocation uses
+    })
     wc.setDate(wc.getDate() + 1)
   }
 
@@ -243,9 +327,36 @@ export function computeState({ buckets, limitEvents, plan, now = new Date() }) {
 
   const allowance = alloc ? alloc.planned[todayKey] : null
 
+  // Where the plan says you *should* be by this moment: every past day's
+  // baseline in full, plus the elapsed fraction of today's. Lets the weekly
+  // gauge say "ahead/behind pace" rather than just "87% gone".
+  const dayFrac = Math.min(1, (now - todayStart) / DAY)
+  const baselinePast = perDay
+    .filter((d) => d.isPast)
+    .reduce((a, d) => a + (d.baseline || 0), 0)
+  const expected = alloc ? baselinePast + (alloc.baseline[todayKey] || 0) * dayFrac : null
+  const daysLeft = perDay.filter((d) => !d.isPast).length
+
   return {
     now: now.toISOString(),
-    week: { start: start.toISOString(), end: end.toISOString(), spent: spentWeek },
+    pool,
+    // For the sub-limit meter, the overall budget is the OTHER constraint —
+    // Fable can be under its 50% cap and still be blocked by the week total.
+    overall:
+      pool === 'fable'
+        ? {
+            spent: costBetween(buckets, start, now, 'all'),
+            capacity: allCapacity.weeklyUsd,
+            share: plan.fableShare ?? 0.5,
+          }
+        : null,
+    week: {
+      start: start.toISOString(),
+      end: end.toISOString(),
+      spent: spentWeek,
+      expected,
+      daysLeft,
+    },
     capacity,
     remaining,
     debt: alloc ? alloc.debt : null,
@@ -259,7 +370,18 @@ export function computeState({ buckets, limitEvents, plan, now = new Date() }) {
       // A zero allowance with spend against it is "over", not "unknown".
       pct: allowance == null ? null : allowance > 0 ? spentToday / allowance : spentToday > 0 ? 99 : 0,
     },
-    block: currentBlock(buckets, now),
+    block: (() => {
+      const blk = currentBlock(buckets, now, pool, plan.blockAnchor)
+      const bc = plan.capacity.block || { mode: 'auto', weeklyUsd: null }
+      const cap =
+        bc.mode === 'manual' && bc.weeklyUsd ? bc.weeklyUsd : inferBlockCapacity(buckets, now)
+      return {
+        ...blk,
+        capacity: cap,
+        pct: cap ? blk.spent / cap : null,
+        source: bc.mode === 'manual' && bc.weeklyUsd ? 'manual' : 'history',
+      }
+    })(),
     perDay,
     limitEvents: limitEvents.slice(-5),
     plan,
@@ -272,18 +394,46 @@ export function computeState({ buckets, limitEvents, plan, now = new Date() }) {
  * derivable from the transcripts. The weekly reset anchor is not — nothing in
  * the local data records it, so that one stays a user setting.
  */
-export function currentBlock(buckets, now) {
+export function currentBlock(buckets, now, pool, anchorISO) {
+  // A user-supplied anchor beats inference. Roll it forward in 5h steps to the
+  // block containing `now`, and only trust it if there was actually activity in
+  // that window — after a long idle the real block starts at the next message,
+  // not on the rolled schedule, so fall back to inference there.
+  if (anchorISO) {
+    const anchor = new Date(anchorISO)
+    if (!Number.isNaN(anchor.getTime())) {
+      let endsAt = new Date(anchor)
+      while (endsAt <= now) endsAt = new Date(endsAt.getTime() + 5 * HOUR)
+      while (endsAt - 5 * HOUR > now) endsAt = new Date(endsAt.getTime() - 5 * HOUR)
+      const since = new Date(endsAt.getTime() - 5 * HOUR)
+      const spent = costBetween(buckets, since, now, pool)
+      if (spent > 0) {
+        return { spent, since: since.toISOString(), endsAt: endsAt.toISOString(), open: true, anchored: true }
+      }
+    }
+  }
+  return inferBlock(buckets, now, pool)
+}
+
+function inferBlock(buckets, now, pool) {
+  // Must go through bucketCost: 'all' has no `pools` entry of its own, so a
+  // direct pools[pool] lookup silently finds nothing and reports no block.
   const hours = Object.keys(buckets)
-    .filter((k) => buckets[k].cost > 0)
+    .filter((k) => bucketCost(buckets[k], pool) > 0)
     .sort()
   if (!hours.length) return { spent: 0, since: null, endsAt: null, open: false }
 
   // Blocks ROLL: a new one starts either after an idle gap or once the current
   // block's 5 hours elapse. Anchoring only on idle gaps means a long continuous
   // session never rolls over and the block reads as permanently expired.
+  //
+  // Use the bucket's exact first-message timestamp, not the hour floor —
+  // rounding to the top of the hour skews the reset countdown by up to 59 min,
+  // and the 5-hour limit is usually the one that actually bites.
   let blockStart = null
   for (const key of hours) {
-    const t = hourKeyToDate(key)
+    const b = buckets[key]
+    const t = b.firstTs != null ? new Date(b.firstTs) : hourKeyToDate(key)
     if (blockStart == null || t - blockStart >= 5 * HOUR) blockStart = t
   }
 
@@ -293,9 +443,26 @@ export function currentBlock(buckets, now) {
   }
 
   return {
-    spent: costBetween(buckets, blockStart, now),
+    spent: costBetween(buckets, blockStart, now, pool),
     since: blockStart.toISOString(),
     endsAt: new Date(blockStart.getTime() + 5 * HOUR).toISOString(),
     open: true,
   }
+}
+
+/**
+ * Capacity of the 5-hour session limit, inferred the same way as the weekly
+ * one: the heaviest 5-hour stretch actually sustained, plus headroom.
+ */
+export function inferBlockCapacity(buckets, now) {
+  const hours = Object.keys(buckets).sort()
+  if (!hours.length) return null
+  let best = 0
+  for (const key of hours) {
+    const t = hourKeyToDate(key)
+    if (t > now) continue
+    const c = costBetween(buckets, t, new Date(t.getTime() + 5 * HOUR))
+    if (c > best) best = c
+  }
+  return best > 0 ? best * 1.15 : null
 }

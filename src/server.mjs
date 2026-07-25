@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { scan } from './scan.mjs'
 import { loadPlan, savePlan, computeState } from './budget.mjs'
+import { POOLS } from './pricing.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const WEB = path.join(HERE, '..', 'web')
@@ -24,6 +25,15 @@ async function getScan(force = false) {
   cached = await scan()
   cachedAt = Date.now()
   return cached
+}
+
+/** Every pool gets its own independent view; the plan (weights, reserve) is shared. */
+function buildState(buckets, limitEvents, plan, fileCount) {
+  const pools = {}
+  for (const id of Object.keys(POOLS)) {
+    pools[id] = computeState({ buckets, limitEvents, plan, pool: id })
+  }
+  return { pools, poolMeta: POOLS, plan, fileCount }
 }
 
 function json(res, code, body) {
@@ -48,32 +58,38 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/state') {
       const { buckets, limitEvents, fileCount } = await getScan(url.searchParams.has('fresh'))
       const plan = await loadPlan()
-      const state = computeState({ buckets, limitEvents, plan })
-      return json(res, 200, { ...state, fileCount })
+      return json(res, 200, buildState(buckets, limitEvents, plan, fileCount))
     }
 
     if (url.pathname === '/api/plan' && req.method === 'POST') {
       const body = await readBody(req)
-      let next = { ...(await loadPlan()), ...body }
+      const next = { ...(await loadPlan()), ...body }
 
       // Calibration in the user's own units: they read a "% used this week"
-      // off /usage, and we solve for the capacity that makes it true. No
-      // dollars involved — the subscription has no dollar meter.
+      // off /usage for one pool, and we solve for the capacity that makes it
+      // true. No dollars involved — the subscription has no dollar meter.
       if (body.calibratePct != null) {
         delete next.calibratePct
-        const pct = Number(body.calibratePct)
+        delete next.calibratePool
+        const target = body.calibratePool || 'all'
+        const p = Number(body.calibratePct)
         const { buckets: b2, limitEvents: l2 } = await getScan()
-        const st = computeState({ buckets: b2, limitEvents: l2, plan: next })
-        if (pct > 0 && pct <= 100 && st.week.spent > 0) {
-          next.capacity = { mode: 'manual', weeklyUsd: st.week.spent / (pct / 100) }
-        } else if (pct === 0) {
-          next.capacity = { mode: 'auto', weeklyUsd: null }
+        // The block meter calibrates against the CURRENT 5h block, not the week.
+        const basisPool = target === 'block' ? 'all' : target
+        const st = computeState({ buckets: b2, limitEvents: l2, plan: next, pool: basisPool })
+        const observed = target === 'block' ? st.block.spent : st.week.spent
+
+        next.capacity = { ...next.capacity }
+        if (p > 0 && p <= 100 && observed > 0) {
+          next.capacity[target] = { mode: 'manual', weeklyUsd: observed / (p / 100) }
+        } else if (p === 0) {
+          next.capacity[target] = { mode: 'auto', weeklyUsd: null }
         }
       }
 
       const plan = await savePlan(next)
       const { buckets, limitEvents, fileCount } = await getScan()
-      return json(res, 200, { ...computeState({ buckets, limitEvents, plan }), fileCount })
+      return json(res, 200, buildState(buckets, limitEvents, plan, fileCount))
     }
 
     // Static files. Only ever serve out of web/.

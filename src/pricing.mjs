@@ -21,6 +21,28 @@ const CACHE_WRITE_5M = 1.25
 const CACHE_WRITE_1H = 2.0
 const CACHE_READ = 0.1
 
+/**
+ * Fable is NOT a separate allowance. On Max it draws from the same weekly
+ * limit as everything else, and is additionally capped at a share of that
+ * limit (50% at time of writing). So there are two meters over one budget:
+ *
+ *   all   — every model, measured against the full weekly limit
+ *   fable — Fable/Mythos only, measured against `fableShare` × that limit
+ *
+ * Fable usage moves BOTH meters. Whichever runs out first is what stops you.
+ * https://support.claude.com/en/articles/15424964-claude-fable-5-on-your-plan
+ */
+export const POOLS = {
+  all: { id: 'all', label: 'All models', kind: 'total' },
+  fable: { id: 'fable', label: 'Fable 5', kind: 'sublimit' },
+}
+
+/** Tags a bucket contribution. 'other' is everything that isn't Fable/Mythos. */
+export function poolFor(model) {
+  const id = (model || '').replace(/^anthropic\./, '')
+  return id.startsWith('claude-fable') || id.startsWith('claude-mythos') ? 'fable' : 'other'
+}
+
 export function rateFor(model) {
   if (!model) return FALLBACK
   // Strip provider prefixes ("anthropic.claude-opus-5") and date suffixes.

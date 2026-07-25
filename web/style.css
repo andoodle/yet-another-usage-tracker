@@ -66,16 +66,75 @@ h2 { font-size: 15px; margin: 0; letter-spacing: 0.04em; text-transform: upperca
 .gauge-value { font-family: var(--mono); font-size: 40px; margin-top: 6px; letter-spacing: -0.02em; }
 .gauge-value .of { color: var(--muted); font-size: 20px; margin-left: 8px; }
 
+.gauges { display: flex; flex-direction: column; gap: 16px; }
+
+.pools { display: flex; gap: 10px; margin-top: 24px; flex-wrap: wrap; }
+.pool {
+  flex: 1 1 200px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 10px;
+  align-items: baseline;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font: inherit;
+  color: var(--muted);
+  cursor: pointer;
+}
+.pool:hover { border-color: var(--muted); }
+.pool.active { border-color: var(--accent); background: var(--surface-2); }
+.pool-name { font-size: 13px; color: var(--fg); }
+.pool.active .pool-name { color: var(--accent); }
+.pool-val { font-family: var(--mono); font-size: 18px; color: var(--fg); }
+.pool-val.warn { color: var(--warn); }
+.pool-val.bad { color: var(--bad); }
+.pool-sub { grid-column: 1 / -1; font-size: 11px; color: var(--muted); }
+
+input[type="range"] { accent-color: var(--accent); width: 120px; }
+.mono { font-family: var(--mono); }
+
 .meter {
+  position: relative;
   height: 8px;
   background: var(--surface-2);
   border-radius: 99px;
-  overflow: hidden;
   margin: 16px 0 10px;
 }
-.meter-fill { height: 100%; width: 0; background: var(--good); transition: width 0.3s ease, background 0.3s ease; }
+.meter-fill {
+  height: 100%;
+  width: 0;
+  background: var(--good);
+  border-radius: 99px;
+  transition: width 0.3s ease, background 0.3s ease;
+}
 
-.verdict { font-size: 13px; color: var(--muted); }
+/* Where the plan says you should be by now. Gap to the fill = running balance. */
+.pace-mark {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 14px;
+  background: var(--fg);
+  opacity: 0.75;
+  border-radius: 1px;
+  transition: left 0.3s ease;
+}
+.pace-mark::after {
+  content: 'plan';
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.verdict { font-size: 13px; color: var(--muted); margin-top: 14px; }
 .verdict.good { color: var(--good); }
 .verdict.warn { color: var(--warn); }
 .verdict.bad { color: var(--bad); }
@@ -83,6 +142,8 @@ h2 { font-size: 15px; margin: 0; letter-spacing: 0.04em; text-transform: upperca
 .stats { margin: 0; display: grid; gap: 14px; align-content: start; }
 .stats div { display: flex; justify-content: space-between; gap: 12px; align-items: baseline;
   border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+/* `hidden` alone loses to the display rule above. */
+.stats div[hidden] { display: none; }
 .stats dt { color: var(--muted); font-size: 13px; }
 .stats dd { margin: 0; font-family: var(--mono); text-align: right; }
 

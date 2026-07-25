@@ -3,13 +3,13 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import readline from 'node:readline'
-import { costOf } from './pricing.mjs'
+import { costOf, poolFor } from './pricing.mjs'
 
 export const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 export const DATA_DIR = path.join(os.homedir(), '.claude', 'budget-data')
 const CACHE_FILE = path.join(DATA_DIR, 'scan-cache.json')
 
-const CACHE_VERSION = 2
+const CACHE_VERSION = 5 // v5 adds firstTs/lastTs for exact 5h block boundaries
 
 async function listJsonl(dir) {
   const out = []
@@ -49,11 +49,25 @@ function bucketKey(iso) {
 }
 
 function emptyBucket() {
-  return { cost: 0, input: 0, output: 0, cacheWrite: 0, cacheRead: 0, msgs: 0 }
+  // `pools` holds per-limit-pool cost; `cost` stays the total for convenience.
+  // firstTs/lastTs keep minute precision inside the hour so the 5-hour block
+  // boundary can be exact instead of rounded to the top of the hour.
+  return {
+    cost: 0, input: 0, output: 0, cacheWrite: 0, cacheRead: 0, msgs: 0, pools: {},
+    firstTs: null, lastTs: null,
+  }
 }
 
-function addToBucket(b, model, usage) {
-  b.cost += costOf(model, usage)
+function addToBucket(b, model, usage, ts) {
+  const c = costOf(model, usage)
+  const pool = poolFor(model)
+  b.cost += c
+  if (!b.pools) b.pools = {}
+  b.pools[pool] = (b.pools[pool] || 0) + c
+  if (ts) {
+    if (b.firstTs == null || ts < b.firstTs) b.firstTs = ts
+    if (b.lastTs == null || ts > b.lastTs) b.lastTs = ts
+  }
   b.input += usage.input_tokens || 0
   b.output += usage.output_tokens || 0
   b.cacheWrite += usage.cache_creation_input_tokens || 0
@@ -111,7 +125,7 @@ async function parseFrom(file, startOffset, seen) {
     const key = bucketKey(o.timestamp)
     if (!key) continue
     if (!buckets[key]) buckets[key] = emptyBucket()
-    addToBucket(buckets[key], m.model, m.usage)
+    addToBucket(buckets[key], m.model, m.usage, Date.parse(o.timestamp) || null)
   }
 
   rl.close()
@@ -122,7 +136,19 @@ async function parseFrom(file, startOffset, seen) {
 function mergeBuckets(target, src) {
   for (const [k, v] of Object.entries(src)) {
     if (!target[k]) target[k] = emptyBucket()
-    for (const f of Object.keys(v)) target[k][f] += v[f]
+    const t = target[k]
+    for (const [f, val] of Object.entries(v)) {
+      if (f === 'pools') {
+        if (!t.pools) t.pools = {}
+        for (const [p, c] of Object.entries(val || {})) t.pools[p] = (t.pools[p] || 0) + c
+      } else if (f === 'firstTs') {
+        if (val != null && (t.firstTs == null || val < t.firstTs)) t.firstTs = val
+      } else if (f === 'lastTs') {
+        if (val != null && (t.lastTs == null || val > t.lastTs)) t.lastTs = val
+      } else {
+        t[f] += val
+      }
+    }
   }
 }
 
