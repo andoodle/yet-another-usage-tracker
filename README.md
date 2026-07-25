@@ -109,3 +109,11 @@ Plan and cache live in `~/.claude/budget-data/` — deleting either is safe.
 - The weekly reset day/hour is a guess until you set it to match `/usage`.
 - `~/Desktop` is TCC-protected, so the LaunchAgent needs Full Disk Access
   granted to your `node` binary (or move the project elsewhere).
+- **Re-grant Full Disk Access after `brew upgrade node`.** macOS attaches TCC
+  grants to the *resolved* binary, and Homebrew's `node` is a symlink into a
+  version-stamped path (`/opt/homebrew/Cellar/node/<version>/bin/node`). A node
+  upgrade moves the real binary, the grant stops matching, and the agent fails
+  **silently** — the dashboard just stops updating with no error or prompt.
+  Symptom: `~/.claude/budget-data/agent.err` shows `EPERM`. Fix: re-add
+  `/opt/homebrew/bin/node` under System Settings → Privacy & Security →
+  Full Disk Access. Moving the project off `~/Desktop` avoids this permanently.
