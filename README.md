@@ -1,4 +1,23 @@
-# claude-budget
+# Yet Another Usage Tracker
+
+A local, zero-dependency dashboard that paces your **weekly Claude Code usage**
+so you don't burn the allowance by Wednesday. It reads the transcripts Claude
+Code already writes to `~/.claude/projects/`, computes what share of your weekly
+allowance you've spent, and tells you how much today gets.
+
+Nothing leaves the machine. No API keys, no credentials, no network calls — the
+server binds to `localhost` and only reads files you already have.
+
+> Not affiliated with, endorsed by, or supported by Anthropic. "Claude" and
+> "Claude Code" are trademarks of Anthropic. This tool estimates consumption
+> from local transcript data; it is not an official usage meter, and the numbers
+> are an approximation (see [Known limits](#known-limits)).
+
+macOS is the tested platform (the always-on installer is a LaunchAgent). The
+server and dashboard themselves are plain Node and should run anywhere Claude
+Code does; only `scripts/` is mac-specific.
+
+## Status
 
 - [x] scan — incremental reader for `~/.claude/projects/**/*.jsonl`
 - [x] weighting — relative consumption model incl. cache write/read multipliers
@@ -12,12 +31,21 @@
 - [ ] Full Disk Access — grant it to `node` so the LaunchAgent can read ~/Desktop
 - [ ] limit pinning — auto-pins on first real rate-limit hit; unverified until one occurs
 
-Paces weekly Claude usage so you don't burn the allowance early. Reads your local
-Claude Code transcripts; nothing leaves the machine, no credentials are touched.
+## Install
+
+Requires **Node 20+**. No `npm install` — there are no dependencies.
+
+```bash
+git clone https://github.com/andoodle/yet-another-usage-tracker.git
+cd yet-another-usage-tracker
+node src/server.mjs
+```
+
+Then open <http://localhost:4478>. Set `BUDGET_PORT` to use a different port.
 
 ## Run
 
-Always-on (recommended) — runs at login, restarts if it dies:
+Always-on (recommended, macOS) — runs at login, restarts if it dies:
 
 ```bash
 scripts/install-launchagent.sh
@@ -82,7 +110,8 @@ fable×k + other  = weekPct × W
 ```
 
 `other` is measured directly and unaffected by `k`, so `W` falls out, then `k`.
-Measured here: **k ≈ 3.4×, i.e. Fable costs roughly 6.7× Opus per token, not 2×.**
+Measured on one account: **k ≈ 3.4×, i.e. Fable costs roughly 6.7× Opus per
+token, not 2×.** That's a single data point — recalibrate on yours.
 
 This also fixed the *weekly* meter, which had been reading ~2 points high — Fable is
 a third of total consumption, so under-weighting it skewed both numbers. Enter the
@@ -152,3 +181,12 @@ Plan and cache live in `~/.claude/budget-data/` — deleting either is safe.
   Symptom: `~/.claude/budget-data/agent.err` shows `EPERM`. Fix: re-add
   `/opt/homebrew/bin/node` under System Settings → Privacy & Security →
   Full Disk Access. Moving the project off `~/Desktop` avoids this permanently.
+
+## Contributing
+
+Issues and PRs welcome. It's a small, dependency-free codebase — keep it that
+way: no runtime dependencies, no build step, plain ES modules.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

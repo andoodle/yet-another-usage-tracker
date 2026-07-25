@@ -1,9 +1,24 @@
 {
-  "name": "claude-budget",
+  "name": "yet-another-usage-tracker",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "Weekly Claude usage pacing dashboard, built from local Claude Code transcripts.",
+  "description": "Yet Another Usage Tracker — weekly Claude usage pacing dashboard, built from local Claude Code transcripts.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andoodle/yet-another-usage-tracker.git"
+  },
+  "homepage": "https://github.com/andoodle/yet-another-usage-tracker#readme",
+  "bugs": {
+    "url": "https://github.com/andoodle/yet-another-usage-tracker/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "usage",
+    "budget",
+    "dashboard"
+  ],
   "scripts": {
     "start": "node src/server.mjs"
   },
