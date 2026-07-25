@@ -10,7 +10,7 @@
 
 **Repo:** [`andoodle/claude-budget`](https://github.com/andoodle/claude-budget) (private) — local path `~/Desktop/Development/claude-budget`
 **Date:** 2026-07-25
-**Last updated:** 2026-07-25, later same session — pushed to GitHub, LaunchAgent live, **Fable model corrected** (see below).
+**Last updated:** 2026-07-25, later same session — pushed to GitHub, LaunchAgent live, **Fable model corrected**, desktop shortcut added (see below).
 **Outcome:** Shipped a working local dashboard that paces Claude subscription usage across a week, running as a login-time background service. All three meters verified against live `/usage`: week 35%, Fable 46%, 5h block 6% — exact matches.
 
 ## What this is
@@ -177,12 +177,22 @@ can't exceed the limit.
 
 ## How to run it (user does not use the terminal)
 
-- **On demand:** double-click **`Open Claude Budget.command`** in the repo root. Starts the
-  server, waits for it to answer, opens the browser. Closing the Terminal window stops it.
-  Detects an already-running instance and just opens the tab.
-- **Always on:** `scripts/install-launchagent.sh` once — but it needs Full Disk Access
-  granted to the `node` binary first, because `~/Desktop` is TCC-protected.
-- **Manual:** `node src/server.mjs`, then http://localhost:4478.
+- **Always on (current setup):** LaunchAgent installed and verified. Just open
+  http://localhost:4478 — running at login, restarts if killed.
+- **Desktop shortcut:** `Claude Budget.app` on the Desktop, built by
+  `scripts/make-desktop-shortcut.sh` (takes a destination arg; `--uninstall` removes it).
+  An `.app` not a `.command`, so no Terminal window; `LSUIElement` keeps it out of the Dock.
+  **It self-heals rather than just opening a URL:** server up → opens; not answering →
+  kickstarts the LaunchAgent; agent unavailable → starts a detached server; all three fail →
+  alert pointing at `agent.err`, since the likely cause is a node upgrade revoking FDA.
+  Verified in both states, including with the agent fully unloaded (recovered to HTTP 200).
+- **Icon is generated, not copied.** `scripts/make-icon.mjs` writes a real PNG by hand with
+  Node's built-in zlib (CRC32 + IHDR/IDAT/IEND, zero deps) in the dashboard palette, then
+  `sips` + `iconutil` build the `.icns`. First attempt copied Safari's icns, but it isn't at
+  a stable path on current macOS and the `[ -f ] && cp` guard failed *silently* → blank
+  bundle. Same failure shape as the pool-lookup bug: a fallback returning "nothing" quietly.
+- **Fallbacks:** `Open Claude Budget.command` (double-click, shows a Terminal window), or
+  `node src/server.mjs`.
 
 ## Performance
 
@@ -200,7 +210,7 @@ corruption. Lesson: check whether the human did it before declaring the machine 
 
 ## State at session end
 
-- **7 commits, pushed, both repos clean and in sync with `origin/main`.**
+- **9 commits, pushed, both repos clean and in sync with `origin/main`.**
 - Running as a LaunchAgent (`com.andy.claude-budget`), state = running, serving :4478.
 - Plan file: `~/.claude/budget-data/plan.json`. Currently: week reset Wed 16:00,
   week limit calibrated, `fableWeight` 3.37, `fableShare` 0.5, block anchored,
@@ -344,7 +354,7 @@ corruption. Lesson: check whether the human did it before declaring the machine 
       <p class="standfirst">Built a local dashboard that paces weekly Claude subscription usage from transcript data. Now running as a login-time service and pushed to a private repo. All three meters verified against live <code>/usage</code>.</p>
       <div class="stats">
         <div class="stat"><b>35 / 46 / 6</b><span>week / fable / block — exact match</span></div>
-        <div class="stat"><b>7</b><span>commits · pushed</span></div>
+        <div class="stat"><b>9</b><span>commits · pushed</span></div>
         <div class="stat"><b>12</b><span>bugs found &amp; fixed</span></div>
         <div class="stat"><b>1.6s → 38ms</b><span>cold → incremental scan</span></div>
         <div class="stat"><b>0</b><span>dependencies</span></div>
@@ -365,7 +375,7 @@ corruption. Lesson: check whether the human did it before declaring the machine 
           </div>
           <div class="card">
             <span class="tag"><span class="dot ok"></span>How to run it</span>
-            <p>Just open <a href="http://localhost:4478">localhost:4478</a> — always running. <code>Open Claude Budget.command</code> remains as a manual fallback.</p>
+            <p>Just open <a href="http://localhost:4478">localhost:4478</a> — always running. Or double-click <strong>Claude Budget.app</strong> on the Desktop, which restarts the server first if it isn't answering.</p>
           </div>
           <div class="card">
             <span class="tag"><span class="dot ok"></span>Pushed &amp; private</span>
@@ -395,13 +405,14 @@ corruption. Lesson: check whether the human did it before declaring the machine 
     </details>
 
     <details>
-      <summary><span class="htext"><span class="sec-eyebrow">Non-obvious</span><h2>Gotchas<span class="count">9</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <summary><span class="htext"><span class="sec-eyebrow">Non-obvious</span><h2>Gotchas<span class="count">10</span></h2></span><span class="chev">&rsaquo;</span></summary>
       <div class="secbody">
         <div class="grid2">
           <div class="nugget"><h3>/usage can't be automated</h3><p>Tested: <code>claude -p "/usage"</code> resolves in 8ms with zero tokens but returns only a generic sentence. The numbers are TUI-rendered and never serialize. <code>/status</code> is unavailable headless.</p></div>
           <div class="nugget"><h3>Fable draws from the same budget</h3><p>Not a separate pool — it counts toward the weekly limit AND is capped at 50% of it. Fable usage moves both meters.</p></div>
           <div class="nugget"><h3>Never override a documented number with an inferred one</h3><p>I fixed Fable's <em>weight</em> at its API price ratio and solved for the share, contradicting Anthropic's published 50%. Backwards — solve for the guess, trust the document. Fable actually costs ~6.7× Opus, not 2×.</p></div>
           <div class="nugget"><h3>A calibration that won't stay put is a wrong model</h3><p>The "share" needed re-deriving every reading. That wasn't noise — it was one parameter absorbing an error in another.</p></div>
+          <div class="nugget"><h3>Silent fallbacks hid three separate bugs</h3><p>An unknown pool returning <code>0</code>, and <code>[ -f ] &amp;&amp; cp</code> skipping a missing icon — both produced wrong output with no error. Prefer loud failure over a plausible-looking default.</p></div>
           <div class="nugget"><h3>Unknown keys returning 0 hide bugs</h3><p>A stale pool name (<code>'standard'</code>) silently produced zero twice: once making the 5h block permanently "none open", once degrading a calibration solve while still saving a bogus limit.</p></div>
           <div class="nugget"><h3>Never show dollars</h3><p>On a subscription there is no dollar meter. API prices are used only as relative weights; every displayed figure is a share of the weekly allowance.</p></div>
           <div class="nugget"><h3>Rolling windows, not calendar weeks</h3><p>A calendar-week maximum ignores the in-progress week, letting a heavy current week exceed its own inferred limit and pin remaining budget to zero.</p></div>
@@ -412,7 +423,7 @@ corruption. Lesson: check whether the human did it before declaring the machine 
     </details>
 
     <details>
-      <summary><span class="htext"><span class="sec-eyebrow">History</span><h2>Commits<span class="count">7</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <summary><span class="htext"><span class="sec-eyebrow">History</span><h2>Commits<span class="count">9</span></h2></span><span class="chev">&rsaquo;</span></summary>
       <div class="secbody">
         <div class="timeline">
           <div class="commit"><span class="hash">ca792a1</span><span class="msg"><strong>Initial dashboard</strong> — scanner, weighting, allocator, server, drag calendar</span></div>
@@ -422,6 +433,8 @@ corruption. Lesson: check whether the human did it before declaring the machine 
           <div class="commit"><span class="hash">6996869</span><span class="msg"><strong>Restore day columns</strong> — stale element ref blanked the calendar; added launcher</span></div>
           <div class="commit"><span class="hash">0f9b95d</span><span class="msg"><strong>Document FDA trap</strong> — node upgrades silently revoke the grant</span></div>
           <div class="commit"><span class="hash">076738f</span><span class="msg"><strong>Correct the Fable model</strong> — trust the documented 50%, solve the weight instead</span></div>
+          <div class="commit"><span class="hash">8437cad</span><span class="msg"><strong>Recap</strong> — shipped, deployed, model corrected</span></div>
+          <div class="commit"><span class="hash">5a4224e</span><span class="msg"><strong>Desktop shortcut</strong> — self-healing .app with a generated icon</span></div>
         </div>
       </div>
     </details>
