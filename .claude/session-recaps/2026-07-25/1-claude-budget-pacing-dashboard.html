@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<!-- CANONICAL CONTENT FOR AI: the complete recap (+ AI notes) is the raw-markdown
+     block below, kept FIRST on purpose. Read just this block (Read with a line limit)
+     to get the whole recap cheaply. Source of truth; the styled body is a human VIEW. -->
+<script type="text/markdown" id="recap">
+# Session 1 — claude-budget: weekly usage pacing dashboard
+
+**Repo:** `~/Desktop/Development/claude-budget` (new, local-only — no git remote)
+**Date:** 2026-07-25
+**Outcome:** Shipped a working local dashboard that paces Claude subscription usage across a week. All three meters verified against live `/usage`: week 34%, Fable 46%, 5h block 23% — exact matches.
+
+## What this is
+
+Reads local Claude Code transcripts (`~/.claude/projects/**/*.jsonl`), derives consumption,
+and splits the remaining weekly allowance across the days left in the window by a
+drag-set per-day availability weight. Zero dependencies, localhost only, nothing leaves
+the machine, no credentials touched.
+
+Runs at http://localhost:4478 via `node src/server.mjs`.
+
+## The three domain findings that shaped everything
+
+### 1. There is no API for subscription usage
+Verified, not assumed. Anthropic publishes none. `ccusage` reads these same local
+transcripts and only fetches a *pricing* table (confirmed via docs + web search).
+
+### 2. `/usage` cannot be automated
+Tested directly: `claude -p "/usage"` **does** resolve the slash command — 0 tokens, ~8ms,
+`num_turns: 0`, no API call — but print mode returns only the string
+*"You are currently using your subscription to power your Claude Code usage"*.
+The percentages are TUI-rendered and never serialize. `--output-format stream-json` adds
+nothing. `/status` returns "isn't available in this environment". There is no
+`claude usage` subcommand (checked `claude --help` subcommand list).
+
+### 3. Fable is a SUB-LIMIT, not a separate pool  ← user corrected me, I had it wrong
+I initially modelled Fable as a disjoint allowance. Wrong. Per Anthropic's docs, on Max
+Fable **draws from the same weekly limit** and is additionally **capped at a share** of it.
+Fable usage moves BOTH meters. Rebuilt as a nested sub-limit over one budget.
+Source: https://support.claude.com/en/articles/15424964-claude-fable-5-on-your-plan
+
+**Empirical wrinkle:** calibrating Fable to the real 46% implies its cap is **~30% of the
+weekly limit here, not the documented 50%**. Two candidate explanations, indistinguishable
+from local data: (a) tier/account share differs, or (b) Anthropic weights Fable consumption
+more heavily than the 2x API price ratio the tool uses. The UI therefore reports the
+*derived* share, never the assumed one.
+
+## How measurement works
+
+No dollar figures are displayed anywhere — on a subscription there is no dollar meter, and
+showing API prices would be a number the user never pays. (User called this out explicitly.)
+Everything on screen is a **share of the weekly allowance**.
+
+Internally consumption is a relative weight:
+`input + output×5 + cacheWrite×1.25 + cacheRead×0.1`, scaled by model tier. Coefficients
+come from API price ratios but are used only for *relative* weighting.
+
+**Why an imperfect estimate is fine:** pacing is scale-invariant. If the total is 20% off,
+every day's slice is off by the same factor, so the ratio between days — the thing that
+says whether to keep working — is unchanged.
+
+### Limit estimation, three tiers
+1. **Inferred** — heaviest rolling 7-day stretch sustained + 15%. Rolling, *not*
+   calendar-aligned (see gotchas).
+2. **Calibrated** — user reads a % off `/usage`, tool solves `limit = spent ÷ pct`.
+   Three always-visible fields: week / Fable / 5h block.
+3. **Pinned** — on a real rate-limit hit Claude Code writes an error into the transcript;
+   the scanner detects it and pins the limit to exact week-to-date consumption.
+   *Untested — no limit event has occurred yet in this data.*
+
+**Calibration semantics (user asked):** the entered number is a one-time observation used
+to derive the LIMIT. The limit persists; the displayed % keeps moving with usage. It is not
+a pinned display value.
+
+**Fable calibration is stored as a SHARE, not an absolute** — it is definitionally a
+fraction of the weekly limit, so an absolute would silently stop tracking once the weekly
+limit was recalibrated. Verified: forcing the week limit 3084 → 4195 moved the Fable cap
+916 → 1246, share held at 0.297.
+
+## Allocation: buffer + debt hybrid (user asked for the hybrid)
+
+Each policy fixes the other's weakness:
+- **Baseline** — each day's share computed once from the week's weights. Does NOT move when
+  you overspend, which is what makes overspend visible instead of silently repricing later days.
+- **Debt** — cumulative (used − baseline) through yesterday, surfaced as "running balance".
+  Reported, not absorbed.
+- **Reserve** — default 15% held back, released when 2 days remain. Its job is to pay the
+  debt down late so a heavy Tuesday doesn't throttle Friday. Both knobs user-adjustable.
+
+Remaining days get `baseline + (releasedReserve − debt) × weight`, hard-capped so the week
+can't exceed the limit.
+
+## Bugs found and fixed (all caught by verification, not by review)
+
+1. **Capacity inference pinned remaining budget to zero.** Used calendar weeks, so a heavy
+   in-progress week exceeded its own inferred capacity. Now rolling 7-day windows including
+   the present.
+2. **Drag was broken** (user reported "dragging works poorly"). Two causes:
+   `setPointerCapture` threw *before* move listeners were attached, killing the gesture
+   silently; and every state update rebuilt the DOM via `innerHTML`, destroying the element
+   mid-gesture. Now: listeners on `window` with capture as best-effort, build-once /
+   patch-in-place rendering.
+3. **`currentBlock` always reported "none open".** Looked up `pools['all']`, which never
+   exists — buckets are tagged `fable`/`other`. Must go through `bucketCost()`.
+4. **Two meters disagreed about the same week** (33.8% vs 48.5%). Fable derived its cap from
+   the *inferred* limit, ignoring calibration. Now one resolved `allCapacity` feeds everything.
+5. **Block reset countdown off by up to 59 min** — used the hour floor. Now exact
+   first-message timestamps (`firstTs`/`lastTs` per bucket).
+6. **Block chain still drifted ~2h even with exact timestamps** — reconstructing the block
+   chain from months of history accumulates error through gaps. Added an explicit
+   `blockAnchor` the user sets from an observed reset time.
+7. **Mid-week reset anchor spans 8 calendar days, two partial.** Wed 15:45 → Wed 15:45.
+   Each day is now weighted by its overlap with the window; the two Wednesday fragments sum
+   to exactly 1.000 day. Verified.
+8. **Past days that overspent rendered in accent, not red** — the `over` check only looked at
+   `planned`, which is null for past days. Now falls back to `baseline`.
+9. **Hidden stat rows still rendered** — `display:flex` beat the `hidden` attribute.
+10. **`fileCount` dropped from the plan-save response** → "undefined transcripts scanned".
+11. **Whole day-column calendar vanished** (user reported "i seem to have lost the day
+    columns"). A leftover `$('cal-pct')` reference survived the switch to three calibration
+    fields; that element no longer exists, so `paintSummary()` threw — and `syncWeekDom()` /
+    `paintWeek()` run *after* it in `apply()`, so the calendar never rendered. Fixed the
+    reference, and made each render step run in its own `try/catch` so one bad element
+    reference can never blank the rest of the dashboard again.
+
+## How to run it (user does not use the terminal)
+
+- **On demand:** double-click **`Open Claude Budget.command`** in the repo root. Starts the
+  server, waits for it to answer, opens the browser. Closing the Terminal window stops it.
+  Detects an already-running instance and just opens the tab.
+- **Always on:** `scripts/install-launchagent.sh` once — but it needs Full Disk Access
+  granted to the `node` binary first, because `~/Desktop` is TCC-protected.
+- **Manual:** `node src/server.mjs`, then http://localhost:4478.
+
+## Performance
+
+Cold scan of 249MB / 561 transcripts: **~1.6s**. Incremental: **~38ms**.
+Achieved with per-file byte offsets + hourly aggregates cached in
+`~/.claude/budget-data/scan-cache.json`. Cache version is 5; bump it on bucket shape changes.
+
+## A correction I made and had to walk back
+
+I diagnosed the user's own edits (week reset 16:00, a calibration value) as a
+"browser form-restoration data-loss bug" and wrote a fix for it. The user replied
+"i changed those values". The `wireSettings()` hardening (wire listeners only after first
+load) was kept because it guards a real class of issue, but it was **not** fixing observed
+corruption. Lesson: check whether the human did it before declaring the machine did.
+
+## State at session end
+
+- 4 commits, working tree clean, **no git remote — nothing pushed, nothing to push**.
+- Plan file: `~/.claude/budget-data/plan.json`. Currently: week reset Wed 16:00,
+  week limit calibrated (~3021 units), Fable share 0.297, block anchored 03:10,
+  reserve 15% / release 2 days.
+- Parent-folder `~/Desktop/Development/.claude/launch.json` gained a `claude-budget` entry.
+  That folder is NOT a git repo, so the edit is untracked by anything.
+
+## Open items
+
+- **LaunchAgent not installed.** User chose "grant Full Disk Access to node" over relocating
+  the project. `~/Desktop` is TCC-protected; this is why `preview_start` couldn't launch the
+  server (EPERM on a file just written) and why the LaunchAgent will need FDA on the node
+  binary. Script is written and executable: `scripts/install-launchagent.sh`.
+  **Needs the user** — granting TCC requires their password.
+- **Limit-event pinning is unverified** — no rate-limit event exists in the data yet.
+- **Fable's real share (~30% vs documented 50%) is unexplained.** Worth revisiting if
+  Anthropic publishes per-tier detail, or if recalibration over several weeks shows drift.
+- **Block anchor may need re-entry after a long idle** — if a block expires while idle, the
+  next one starts at the next message rather than on the rolled schedule. The code detects
+  this and falls back to inference, but the anchor goes stale.
+- Weekly reset is set to 16:00; the user originally said **3:45pm**. Left as they set it.
+
+## AI notes (scratch — optional, written by Claude for future sessions)
+
+- **Verify before asserting, it paid off repeatedly this session.** Three times a quick
+  empirical check overturned a plausible assumption: the `/usage` headless test (it *does*
+  resolve, just returns nothing useful), the `rateLimits` grep (present but always `null`,
+  inside error objects only), and the reset-field grep (zero hits — the 132 "resets" matches
+  were prose in message text). Each would have been wrong if reasoned from memory.
+- **The user's ground-truth numbers are the highest-value input in this project.** One
+  message with three real percentages (34/46/23) instantly exposed two bugs and one wrong
+  domain model. When stuck on whether a computed number is right, *ask for the real one*.
+- **Don't model a domain from the API price sheet.** Fable's 2x API price ratio does not
+  appear to match its subscription weighting. The tool works anyway because calibration
+  corrects scale — design for calibration rather than for a correct-looking model.
+- **Check whether the human changed it before diagnosing corruption** (see walk-back above).
+- If revisiting the allocator: `todaysAllowance()` was replaced by `allocate()`; the
+  BUFFER/DEBT/STRICT policy discussion lives in the docblock there.
+</script>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Session 1 — claude-budget pacing dashboard</title>
+<style>
+  :root{--red-500:#EF3340;--red-700:#B3242B;--red-50:#FDECEC;--paper:#FAF8F5;--card:#FFFFFF;
+    --border:#DDD7CF;--border-subtle:#ECE7E0;--fg-1:#181512;--fg-2:#3D3833;--fg-3:#6B645C;
+    --ok:#12B76A;--attn:#F79009;--chip:#F1ECE5;
+    --font-display:"Barlow Condensed","Oswald","Segoe UI Semibold",system-ui,sans-serif;
+    --font-mono:"Roboto Mono",ui-monospace,"Cascadia Code",Consolas,Menlo,monospace;
+    --radius-md:4px;--radius-lg:8px;--shadow:0 1px 2px rgba(11,9,8,.06),0 4px 8px -2px rgba(11,9,8,.06);--maxw:880px;}
+  *{box-sizing:border-box;}html,body{margin:0;padding:0;}
+  body{background:var(--paper);color:var(--fg-2);font-family:var(--font-mono);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px 72px;}
+  .topbar{max-width:var(--maxw);margin:0 auto;padding:26px 28px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;}
+  .logo{display:inline-flex;align-items:center;gap:9px;}
+  .logo .flag{background:var(--red-500);color:#fff;font-family:var(--font-display);font-weight:800;font-size:17px;padding:3px 7px 2px;border-radius:2px;line-height:1;}
+  .logo .word{font-family:var(--font-display);font-weight:700;font-size:17px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg-1);}
+  .doc-meta{font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);text-align:right;}
+  .doc-meta .tag{color:var(--red-700);font-weight:700;}
+  .topdivide{max-width:var(--maxw);margin:16px auto 0;padding:0 28px;}.topdivide hr{border:0;border-top:2px solid var(--red-500);margin:0;}
+  .hero{padding:38px 0 4px;}
+  .eyebrow{font-size:11px;font-weight:700;letter-spacing:.26em;text-transform:uppercase;color:var(--red-700);margin:0 0 12px;}
+  h1{font-family:var(--font-display);font-weight:800;font-size:46px;line-height:1.03;text-transform:uppercase;color:var(--fg-1);margin:0 0 14px;}
+  .standfirst{font-size:16px;color:var(--fg-2);max-width:64ch;margin:0;}
+  .stats{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px;}
+  .stat{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);padding:9px 15px;box-shadow:var(--shadow);}
+  .stat b{font-family:var(--font-display);font-weight:700;font-size:22px;color:var(--fg-1);display:block;line-height:1;margin-bottom:3px;}
+  .stat span{font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);}
+  details{padding-top:34px;border:0;}details+details{border-top:1px solid var(--border-subtle);}
+  summary{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;cursor:pointer;list-style:none;padding-top:6px;}
+  summary::-webkit-details-marker{display:none;}summary .htext{flex:1;}
+  summary .chev{font-family:var(--font-mono);font-weight:700;font-size:20px;line-height:1;color:var(--red-500);margin-top:16px;transition:transform .18s ease;user-select:none;}
+  details[open] summary .chev{transform:rotate(90deg);}summary:hover h2{color:var(--red-700);}
+  .count{font-family:var(--font-mono);font-size:12px;font-weight:700;color:var(--red-700);background:var(--red-50);border-radius:20px;padding:2px 9px;margin-left:10px;vertical-align:middle;}
+  .secbody{padding-top:14px;}
+  .sec-eyebrow{font-size:11px;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:var(--red-700);margin:0 0 8px;display:flex;align-items:center;gap:10px;}
+  .sec-eyebrow::before{content:"";width:18px;height:2px;background:var(--red-500);display:inline-block;}
+  h2{font-family:var(--font-display);font-weight:700;font-size:27px;line-height:1.1;text-transform:uppercase;color:var(--fg-1);margin:0;transition:color .12s;}
+  h3{font-family:var(--font-mono);font-weight:700;font-size:13.5px;color:var(--fg-1);margin:0 0 6px;}
+  p{margin:0 0 12px;}p:last-child{margin-bottom:0;}strong{color:var(--fg-1);font-weight:700;}
+  code{font-family:var(--font-mono);background:var(--chip);padding:.1em .4em;border-radius:3px;font-size:.86em;color:var(--fg-1);}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:18px 20px;box-shadow:var(--shadow);}
+  .card .tag{display:inline-flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px;}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;}.dot.ok{background:var(--ok);}.dot.attn{background:var(--attn);}
+  .card p{font-size:13.5px;margin:0;}
+  .timeline{display:grid;}
+  .commit{display:grid;grid-template-columns:84px 1fr;gap:14px;align-items:baseline;padding:9px 0;border-bottom:1px solid var(--border-subtle);}
+  .commit:last-child{border-bottom:0;}
+  .commit .hash{background:var(--fg-1);color:#fff;font-size:11.5px;padding:3px 0;border-radius:3px;text-align:center;letter-spacing:.02em;}
+  .commit .msg{font-size:13.5px;color:var(--fg-2);}.commit .msg strong{color:var(--fg-1);}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .nugget{background:var(--card);border:1px solid var(--border);border-left:3px solid var(--red-500);border-radius:var(--radius-md);padding:13px 16px;box-shadow:var(--shadow);}
+  .nugget h3{margin-bottom:5px;}.nugget p{font-size:12.5px;color:var(--fg-2);margin:0;}
+  ul.clean{list-style:none;margin:0;padding:0;display:grid;gap:8px;}
+  ul.clean li{position:relative;padding-left:24px;font-size:13.5px;color:var(--fg-2);}
+  ul.clean li::before{content:"";position:absolute;left:3px;top:8px;width:7px;height:7px;background:var(--red-500);border-radius:1px;transform:rotate(45deg);}
+  ul.clean li strong{color:var(--fg-1);}
+  .check{list-style:none;margin:0;padding:0;display:grid;gap:11px;}
+  .check li{position:relative;padding-left:28px;font-size:13.5px;color:var(--fg-2);}
+  .check li::before{content:"";position:absolute;left:0;top:2px;width:15px;height:15px;border:2px solid var(--attn);border-radius:3px;}
+  .check li strong{color:var(--fg-1);}
+  .snap h3{margin:16px 0 6px;}
+  pre{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:13px 16px;overflow-x:auto;font-size:12px;line-height:1.5;color:var(--fg-2);box-shadow:var(--shadow);margin:0 0 6px;}
+  pre code{background:none;padding:0;color:var(--fg-2);}
+  .resume .secbody{background:var(--fg-1);color:#EDE9E3;border-radius:var(--radius-lg);padding:20px 24px;margin-top:14px;}
+  .resume pre{background:#231e1a;border:1px solid #3a332d;color:#D9D2CA;font-size:12.5px;box-shadow:none;margin:0;}
+  .raw pre{max-height:520px;overflow:auto;font-size:11.5px;white-space:pre-wrap;word-break:break-word;}
+  .raw .hint{font-size:11px;color:var(--fg-3);margin:0 0 8px;}
+  footer{max-width:var(--maxw);margin:48px auto 0;padding:20px 28px 36px;border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);}
+  .controls{max-width:var(--maxw);margin:18px auto 0;padding:0 28px;text-align:right;}
+  .controls button{font-family:var(--font-mono);font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);background:none;border:1px solid var(--border);border-radius:20px;padding:5px 12px;cursor:pointer;}
+  .controls button:hover{color:var(--red-700);border-color:var(--red-500);}
+  @media (max-width:640px){h1{font-size:34px;}h2{font-size:23px;}.cards,.grid2{grid-template-columns:1fr;}.commit{grid-template-columns:72px 1fr;}}
+  @media print{:root{--paper:#fff;}body{background:#fff;font-size:11pt;}.card,.nugget,.stat,pre{box-shadow:none;}
+    .controls,summary .chev{display:none;}details>.secbody{display:block!important;}
+    details,.card,.nugget,.commit{page-break-inside:avoid;}*{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="logo"><span class="flag">GPX</span><span class="word">Stream</span></span>
+    <span class="doc-meta"><span class="tag">Session Recap · Internal</span><br />claude-budget · 2026-07-25</span>
+  </div>
+  <div class="topdivide"><hr /></div>
+  <div class="wrap">
+    <div class="hero">
+      <p class="eyebrow">Session 1</p>
+      <h1>Claude usage pacing dashboard</h1>
+      <p class="standfirst">Built a local dashboard that paces weekly Claude subscription usage from transcript data. All three meters verified against live <code>/usage</code>.</p>
+      <div class="stats">
+        <div class="stat"><b>34 / 46 / 23</b><span>week / fable / block — exact match</span></div>
+        <div class="stat"><b>4</b><span>commits</span></div>
+        <div class="stat"><b>11</b><span>bugs found &amp; fixed</span></div>
+        <div class="stat"><b>1.6s → 38ms</b><span>cold → incremental scan</span></div>
+        <div class="stat"><b>0</b><span>dependencies</span></div>
+      </div>
+    </div>
+    <div class="controls">
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=true)">Expand all</button>
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=false)">Collapse all</button>
+    </div>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Where it stands</span><h2>Status</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="cards">
+          <div class="card">
+            <span class="tag"><span class="dot ok"></span>Working &amp; verified</span>
+            <p>Runs at <code>localhost:4478</code> via <code>node src/server.mjs</code>. Week, Fable and 5-hour meters all reproduce the real <code>/usage</code> numbers exactly. Working tree clean, 4 commits.</p>
+          </div>
+          <div class="card">
+            <span class="tag"><span class="dot ok"></span>How to run it</span>
+            <p>Double-click <code>Open Claude Budget.command</code> for on-demand. For always-on, run <code>scripts/install-launchagent.sh</code> once (needs Full Disk Access on <code>node</code>).</p>
+          </div>
+          <div class="card">
+            <span class="tag"><span class="dot attn"></span>Not pushed anywhere</span>
+            <p><strong>No git remote.</strong> This is a local-only repo — nothing was pushed and there is nothing to push. Create a remote first if this should live off-machine.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Still to do</span><h2>Open Items<span class="count">4</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <ul class="check">
+          <li><strong>LaunchAgent not installed — needs you.</strong> Granting Full Disk Access to the <code>node</code> binary requires your password. <code>~/Desktop</code> is TCC-protected, which is also why the in-app preview runner couldn't start the server. Script is ready: <code>scripts/install-launchagent.sh</code>.</li>
+          <li><strong>Limit-event pinning is unverified.</strong> The code detects a real rate-limit hit and pins the limit exactly — but no such event exists in the data yet, so that path has never run.</li>
+          <li><strong>Fable's real share is ~30%, not the documented 50%.</strong> Unexplained. Either the tier differs or Fable is weighted more heavily than its API price ratio suggests.</li>
+          <li><strong>Block anchor goes stale after a long idle.</strong> If a block expires while you're away, the next starts at your next message, not on the rolled schedule. Code falls back to inference, but re-enter the reset time to be exact.</li>
+          <li><strong>Weekly reset is set to 16:00</strong>, though you originally said 3:45pm. Left as you set it.</li>
+        </ul>
+      </div>
+    </details>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Pick up here</span><h2>Resume</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody resume-inner">
+        <p>Nothing is blocked on code. The one outstanding action is yours (Full Disk Access). If returning to development, the highest-value next steps are exercising the untested limit-event path and watching whether calibration drifts over a full week.</p>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Non-obvious</span><h2>Gotchas<span class="count">6</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="grid2">
+          <div class="nugget"><h3>/usage can't be automated</h3><p>Tested: <code>claude -p "/usage"</code> resolves in 8ms with zero tokens but returns only a generic sentence. The numbers are TUI-rendered and never serialize. <code>/status</code> is unavailable headless.</p></div>
+          <div class="nugget"><h3>Fable draws from the same budget</h3><p>Not a separate pool — it counts toward the weekly limit AND is capped at a share of it. Fable usage moves both meters. I had this wrong until corrected.</p></div>
+          <div class="nugget"><h3>Never show dollars</h3><p>On a subscription there is no dollar meter. API prices are used only as relative weights; every displayed figure is a share of the weekly allowance.</p></div>
+          <div class="nugget"><h3>Rolling windows, not calendar weeks</h3><p>A calendar-week maximum ignores the in-progress week, letting a heavy current week exceed its own inferred limit and pin remaining budget to zero.</p></div>
+          <div class="nugget"><h3>A mid-week reset spans 8 days</h3><p>Wed 15:45 → Wed 15:45 touches eight calendar days, two partial. Each is weighted by its overlap; the two fragments sum to exactly one day.</p></div>
+          <div class="nugget"><h3>~/Desktop is TCC-protected</h3><p>Files written there are unreadable to the preview runner and will be to launchd too — EPERM on a file just created. Grant FDA or relocate.</p></div>
+        </div>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">History</span><h2>Commits<span class="count">4</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="timeline">
+          <div class="commit"><span class="hash">ca792a1</span><span class="msg"><strong>Initial dashboard</strong> — scanner, weighting, allocator, server, drag calendar</span></div>
+          <div class="commit"><span class="hash">bdeb14f</span><span class="msg"><strong>Percentages + buffer/debt</strong> — dropped dollars, hybrid allocation, fixed the drag</span></div>
+          <div class="commit"><span class="hash">4604ce4</span><span class="msg"><strong>Fable sub-limit</strong> — weekly gauge, 5h block meter, reserve controls</span></div>
+          <div class="commit"><span class="hash">6fce866</span><span class="msg"><strong>Calibration</strong> — three visible fields, Fable stored as a share</span></div>
+        </div>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Reference</span><h2>Layout &amp; State</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody snap">
+        <h3>Source</h3>
+        <pre><code>src/scan.mjs      incremental transcript reader (byte offsets + hourly buckets)
+src/pricing.mjs   model tiers, cache multipliers, pool tagging
+src/budget.mjs    windowing, limit inference, buffer+debt allocation, blocks
+src/server.mjs    GET /api/state, POST /api/plan, static files
+web/              dashboard (build-once / patch-in-place rendering)</code></pre>
+        <h3>Runtime state (outside the repo)</h3>
+        <pre><code>~/.claude/budget-data/plan.json        settings + calibration
+~/.claude/budget-data/scan-cache.json  cache v5 — bump on bucket shape change
+~/Desktop/Development/.claude/launch.json  gained a claude-budget entry (not a repo)</code></pre>
+      </div>
+    </details>
+
+    <details class="raw">
+      <summary><span class="htext"><span class="sec-eyebrow">For the record</span><h2>Full Record + AI Notes</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p class="hint">Complete raw recap + Claude's scratch notes — the same canonical block the AI reads from the top of this file.</p>
+        <pre id="fullmd"></pre>
+      </div>
+    </details>
+  </div>
+  <footer><span>GPX Stream · Session Recap 1</span><span>Internal — claude-budget</span></footer>
+  <script>document.getElementById('fullmd').textContent=document.getElementById('recap').textContent.trim();</script>
+</body>
+</html>

@@ -61,10 +61,16 @@ function apply(next) {
   all = next
   if (!all.pools[pool]) pool = 'all'
   state = { ...all.pools[pool], plan: all.plan, fileCount: all.fileCount }
-  paintPools()
-  paintSummary()
-  syncWeekDom()
-  paintWeek()
+  // Each section paints independently. A single bad element reference used to
+  // throw inside paintSummary and take the whole calendar down with it, since
+  // the week renders after it.
+  for (const step of [paintPools, paintSummary, syncWeekDom, paintWeek]) {
+    try {
+      step()
+    } catch (err) {
+      console.error(`render step ${step.name} failed:`, err)
+    }
+  }
 }
 
 /** Tabs, each showing its own week % so both meters are visible at a glance. */
@@ -318,12 +324,6 @@ function paintSummary() {
   const p2 = (n) => String(n).padStart(2, '0')
   if (document.activeElement !== $('week-time')) {
     $('week-time').value = `${p2(state.plan.weekStart.hour)}:${p2(state.plan.weekStart.minute || 0)}`
-  }
-  if (document.activeElement !== $('cal-pct')) {
-    $('cal-pct').value =
-      state.plan.capacity.mode === 'manual' && capacityUnits()
-        ? Math.round((state.week.spent / capacityUnits()) * 100)
-        : ''
   }
 }
 
