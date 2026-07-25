@@ -17,6 +17,13 @@ const RATES = {
 
 const FALLBACK = { input: 5, output: 25 } // unknown model -> assume Opus tier
 
+// NOTE: these are API list prices, used only as a RELATIVE weighting baseline.
+// A subscription does not meter usage at list-price ratios. Measured against
+// real /usage readings, Fable consumes roughly 6.7x Opus per token, not the 2x
+// its list price implies — so `plan.fableWeight` carries a solved correction on
+// top of the ratio below. Do not "fix" the Fable rate here to compensate; that
+// would double-count once the weight is calibrated.
+
 const CACHE_WRITE_5M = 1.25
 const CACHE_WRITE_1H = 2.0
 const CACHE_READ = 0.1

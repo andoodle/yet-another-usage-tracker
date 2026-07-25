@@ -53,6 +53,31 @@ That's also why the estimate being imperfect doesn't matter much: pacing is
 same factor, and the ratio between days — the thing that tells you whether to
 keep going — is unchanged.
 
+### The Fable sub-limit, and why the weight is calibrated
+
+Fable is capped at **50% of the weekly limit** (documented by Anthropic), and its
+usage *also* counts toward the weekly total. Two meters, one budget.
+
+That leaves two unknowns: the weekly limit `W`, and how heavily Fable is metered.
+An earlier version got this backwards — it assumed Fable weighs 2x Opus (its API
+list-price ratio) and solved for the *share*, producing ~30% and contradicting the
+docs. **API list prices have no necessary relationship to subscription metering.**
+
+Now the documented 50% is treated as fact and the *weight* is solved instead, from
+two readings taken at the same moment:
+
+```
+fable×k          = fablePct × 0.5 × W
+fable×k + other  = weekPct × W
+```
+
+`other` is measured directly and unaffected by `k`, so `W` falls out, then `k`.
+Measured here: **k ≈ 3.4×, i.e. Fable costs roughly 6.7× Opus per token, not 2×.**
+
+This also fixed the *weekly* meter, which had been reading ~2 points high — Fable is
+a third of total consumption, so under-weighting it skewed both numbers. Enter the
+week and Fable percentages together; either one alone can't determine either unknown.
+
 ### Estimating the weekly limit
 
 1. **Inferred** (default): the heaviest rolling 7-day stretch you've actually

@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { scan } from './scan.mjs'
-import { loadPlan, savePlan, computeState } from './budget.mjs'
+import { loadPlan, savePlan, computeState, solveFromObservations, costBetween, weekWindow } from './budget.mjs'
 import { POOLS } from './pricing.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -64,6 +64,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/plan' && req.method === 'POST') {
       const body = await readBody(req)
       const next = { ...(await loadPlan()), ...body }
+      let calibrationNote = null
 
       // Calibration in the user's own units: they read a "% used this week"
       // off /usage for one pool, and we solve for the capacity that makes it
@@ -80,25 +81,64 @@ const server = http.createServer(async (req, res) => {
         const observed = target === 'block' ? st.block.spent : st.week.spent
 
         next.capacity = { ...next.capacity }
-        if (p === 0) {
-          next.capacity[target] = { mode: 'auto', weeklyUsd: null }
-        } else if (p > 0 && p <= 100 && observed > 0) {
-          const implied = observed / (p / 100)
-          if (target === 'fable') {
-            // Store the sub-limit as a share so it tracks the weekly limit.
-            const overall = st.overall?.capacity
-            next.capacity.fable = overall
-              ? { mode: 'share', share: implied / overall }
-              : { mode: 'manual', weeklyUsd: implied }
-          } else {
-            next.capacity[target] = { mode: 'manual', weeklyUsd: implied }
+        next.observed = { ...(next.observed || {}) }
+
+        if (target === 'block') {
+          // The 5h limit is independent of the weekly one — solve it alone.
+          if (p === 0) next.capacity.block = { mode: 'auto', weeklyUsd: null }
+          else if (p > 0 && p <= 100 && observed > 0) {
+            next.capacity.block = { mode: 'manual', weeklyUsd: observed / (p / 100) }
+          }
+        } else {
+          // Week and Fable share two unknowns (weekly limit + Fable weight), so
+          // one reading alone can't determine either. Remember it, and solve
+          // jointly as soon as both are known.
+          if (p === 0) {
+            next.observed[target === 'fable' ? 'fablePct' : 'weekPct'] = null
+            next.capacity.all = { mode: 'auto', weeklyUsd: null }
+            next.capacity.fable = { mode: 'auto', weeklyUsd: null }
+            next.fableWeight = 1
+          } else if (p > 0 && p <= 100) {
+            next.observed[target === 'fable' ? 'fablePct' : 'weekPct'] = p
+
+            const { weekPct, fablePct } = next.observed
+            // Measure the two pools DIRECTLY at weight 1. Deriving them from a
+            // computeState total is fragile — it silently returned zero when the
+            // default pool name went stale, and a zero here quietly degrades the
+            // solve to "no correction" instead of failing loudly.
+            const { start: wkStart } = weekWindow(new Date(), next.weekStart)
+            const nowD = new Date()
+            const fableUnits = costBetween(b2, wkStart, nowD, 'fable', 1)
+            const otherUnits = costBetween(b2, wkStart, nowD, 'other', 1)
+
+            if (weekPct != null && fablePct != null) {
+              const sol = solveFromObservations({
+                weekPct, fablePct,
+                fableShare: next.fableShare ?? 0.5,
+                fableUnits, otherUnits,
+              })
+              if (sol.error) {
+                calibrationNote = sol.error
+              } else {
+                next.fableWeight = sol.fableWeight
+                next.capacity.all = { mode: 'manual', weeklyUsd: sol.weeklyUsd }
+                next.capacity.fable = { mode: 'auto', weeklyUsd: null } // derived from share
+              }
+            } else if (weekPct != null) {
+              // Only the week is known — solve the limit at the current weight.
+              const total = fableUnits * (next.fableWeight ?? 1) + otherUnits
+              next.capacity.all = { mode: 'manual', weeklyUsd: total / (weekPct / 100) }
+              calibrationNote = 'Enter the Fable % too — both are needed to solve the Fable weight.'
+            } else {
+              calibrationNote = 'Enter the week % too — both are needed to solve the Fable weight.'
+            }
           }
         }
       }
 
       const plan = await savePlan(next)
       const { buckets, limitEvents, fileCount } = await getScan()
-      return json(res, 200, buildState(buckets, limitEvents, plan, fileCount))
+      return json(res, 200, { ...buildState(buckets, limitEvents, plan, fileCount), calibrationNote })
     }
 
     // Static files. Only ever serve out of web/.

@@ -18,8 +18,17 @@ export const DEFAULT_PLAN = {
     // It needs its own capacity or its percentage is meaningless.
     block: { mode: 'auto', weeklyUsd: null },
   },
-  // Share of the weekly limit usable on Fable (50% on Max at time of writing).
+  // Share of the weekly limit usable on Fable. This is DOCUMENTED by Anthropic
+  // (50% on Max), so it is treated as fact and not solved for.
   fableShare: 0.5,
+  // How much Fable consumption weighs relative to this tool's price-ratio
+  // estimate. API list prices put Fable at 2x Opus, but a subscription meters
+  // usage on its own terms — measurement showed ~3.3x that, i.e. ~6.7x Opus.
+  // Solved from observed /usage readings rather than assumed. 1 = no correction.
+  fableWeight: 1,
+  // Last observed /usage percentages, kept so entering one reading can be
+  // combined with the other to solve for both unknowns at once.
+  observed: { weekPct: null, fablePct: null },
   // A known 5-hour-block reset moment (ISO). Reconstructing the block chain
   // from transcript history alone drifts — gaps and hour bucketing move the
   // anchor by hours. One observed reset time pins it exactly; the chain then
@@ -56,6 +65,44 @@ function migrate(p) {
   return out
 }
 
+/**
+ * Solve the weekly limit AND the Fable weight together from two observed
+ * /usage readings.
+ *
+ * The two unknowns are the weekly limit `W` and the Fable weight correction
+ * `k`. Anthropic documents the Fable cap as `fableShare × W`, so that is taken
+ * as fact rather than solved for — the earlier approach did the reverse
+ * (trusting an API price ratio and solving for the share), which contradicted
+ * the docs and left the weekly meter wrong too, since Fable is a large slice
+ * of total consumption.
+ *
+ *   fableUnits × k        = fablePct × fableShare × W
+ *   fableUnits × k + other = weekPct × W
+ *
+ * Subtracting gives `other = (weekPct − fablePct × fableShare) × W`, and
+ * `other` is measured directly and unaffected by k — so W falls out, then k.
+ *
+ * @returns {{weeklyUsd:number, fableWeight:number}|{error:string}}
+ */
+export function solveFromObservations({ weekPct, fablePct, fableShare, fableUnits, otherUnits }) {
+  const w = weekPct / 100
+  const f = fablePct / 100
+  const denom = w - f * fableShare
+
+  if (!(otherUnits > 0)) return { error: 'no non-Fable usage recorded this week yet' }
+  if (denom <= 0) {
+    // Fable would account for the entire week or more — inconsistent readings,
+    // or every single request this week was Fable.
+    return { error: 'readings imply Fable is 100% of the week; check the numbers' }
+  }
+  const weeklyUsd = otherUnits / denom
+  if (!(fableUnits > 0)) return { weeklyUsd, fableWeight: 1 }
+
+  const fableWeight = (f * fableShare * weeklyUsd) / fableUnits
+  if (!Number.isFinite(fableWeight) || fableWeight <= 0) return { error: 'could not solve Fable weight' }
+  return { weeklyUsd, fableWeight }
+}
+
 export async function loadPlan() {
   try {
     return migrate(JSON.parse(await fsp.readFile(PLAN_FILE, 'utf8')))
@@ -70,6 +117,9 @@ export async function savePlan(plan) {
   // Clamp the user-tunable knobs so a bad value can't wedge the allocator.
   merged.reserveFraction = Math.max(0, Math.min(0.6, Number(merged.reserveFraction) || 0))
   merged.reserveReleaseDays = Math.max(0, Math.min(7, Math.round(Number(merged.reserveReleaseDays) || 0)))
+  // A solve from inconsistent readings could otherwise store an absurd weight
+  // and skew every meter; keep it inside a defensible range.
+  merged.fableWeight = Math.max(0.05, Math.min(50, Number(merged.fableWeight) || 1))
   await fsp.writeFile(PLAN_FILE, JSON.stringify(merged, null, 2))
   return merged
 }
@@ -94,21 +144,27 @@ export function weekWindow(now, weekStart) {
 }
 
 /**
- * Cost of one bucket for a given meter. 'all' is the full total — Fable
- * included, because Fable draws from the same weekly limit. 'fable' is the
- * Fable-only subset used for its sub-limit.
+ * Cost of one bucket for a given meter, with the Fable weight correction
+ * applied. 'all' is the full total — Fable included, because Fable draws from
+ * the same weekly limit. 'fable' is the Fable-only subset for its sub-limit.
+ *
+ * `b.cost` is NOT used for the total: it was summed at scan time with the
+ * uncorrected weight, so it would silently ignore `fableWeight`.
  */
-function bucketCost(b, pool) {
-  if (!pool || pool === 'all') return b.cost
+function bucketCost(b, pool, fw = 1) {
+  const fable = ((b.pools && b.pools.fable) || 0) * fw
+  const other = (b.pools && b.pools.other) || 0
+  if (!pool || pool === 'all') return fable + other
+  if (pool === 'fable') return fable
   return (b.pools && b.pools[pool]) || 0
 }
 
 /** Sum bucket cost over [from, to), optionally for a single pool. */
-export function costBetween(buckets, from, to, pool) {
+export function costBetween(buckets, from, to, pool, fw = 1) {
   let sum = 0
   for (const [key, b] of Object.entries(buckets)) {
     const t = hourKeyToDate(key)
-    if (t >= from && t < to) sum += bucketCost(b, pool)
+    if (t >= from && t < to) sum += bucketCost(b, pool, fw)
   }
   return sum
 }
@@ -120,13 +176,13 @@ function hourKeyToDate(key) {
 }
 
 /** Per-day cost totals within a window, keyed "YYYY-MM-DD". */
-export function dailyTotals(buckets, from, to, pool) {
+export function dailyTotals(buckets, from, to, pool, fw = 1) {
   const out = {}
   for (const [key, b] of Object.entries(buckets)) {
     const t = hourKeyToDate(key)
     if (t < from || t >= to) continue
     const k = key.split('T')[0]
-    out[k] = (out[k] || 0) + bucketCost(b, pool)
+    out[k] = (out[k] || 0) + bucketCost(b, pool, fw)
   }
   return out
 }
@@ -137,7 +193,7 @@ export function dailyTotals(buckets, from, to, pool) {
  * doesn't need the true number — but this keeps the percentages honest.
  * A detected rate-limit event pins capacity exactly (see limitEvents).
  */
-export function inferCapacity(buckets, weekStart, now, limitEvents = [], pool) {
+export function inferCapacity(buckets, weekStart, now, limitEvents = [], pool, fw = 1) {
   // If we caught an actual limit event, the week-to-date spend at that moment
   // IS the capacity. That is free ground truth, no manual entry required.
   const pins = []
@@ -145,7 +201,7 @@ export function inferCapacity(buckets, weekStart, now, limitEvents = [], pool) {
     const at = new Date(ev.at)
     if (Number.isNaN(at.getTime())) continue
     const { start } = weekWindow(at, weekStart)
-    pins.push(costBetween(buckets, start, at, pool))
+    pins.push(costBetween(buckets, start, at, pool, fw))
   }
   if (pins.length) {
     return { weeklyUsd: Math.max(...pins), source: 'limit-event', pins: pins.length }
@@ -164,7 +220,7 @@ export function inferCapacity(buckets, weekStart, now, limitEvents = [], pool) {
   let best = 0
   while (cursor <= now) {
     const to = new Date(Math.min(cursor.getTime() + 7 * DAY, now.getTime()))
-    const c = costBetween(buckets, cursor, to, pool)
+    const c = costBetween(buckets, cursor, to, pool, fw)
     if (c > best) best = c
     cursor.setDate(cursor.getDate() + 1)
   }
@@ -251,14 +307,18 @@ export function allocate({ capacity, plan, days, spentByDay, todayKey }) {
 }
 
 /** Build the full dashboard state. */
-export function computeState({ buckets, limitEvents, plan, pool = 'standard', now = new Date() }) {
+// Default pool is 'all'. It was left as the long-removed 'standard' after the
+// pool rename, which silently produced zero for every total — bucket lookups
+// for an unknown pool return 0 rather than throwing.
+export function computeState({ buckets, limitEvents, plan, pool = 'all', now = new Date() }) {
   const { start, end } = weekWindow(now, plan.weekStart)
-  const spentWeek = costBetween(buckets, start, now, pool)
+  const fw = plan.fableWeight ?? 1
+  const spentWeek = costBetween(buckets, start, now, pool, fw)
 
   // The overall limit is the one real quantity; Fable's cap is a share of it.
   // Inferring Fable independently would be wrong — a week with little Fable
   // use would "prove" a tiny Fable limit that doesn't exist.
-  const inferredAll = inferCapacity(buckets, plan.weekStart, now, limitEvents, 'all')
+  const inferredAll = inferCapacity(buckets, plan.weekStart, now, limitEvents, 'all', fw)
   const allCfg = plan.capacity.all || { mode: 'auto', weeklyUsd: null }
   // Resolve the overall limit ONCE. Everything else — the Fable sub-cap and
   // the Fable meter's overall reference — must derive from this same number,
@@ -292,8 +352,8 @@ export function computeState({ buckets, limitEvents, plan, pool = 'standard', no
   const todayStart = new Date(now)
   todayStart.setHours(0, 0, 0, 0)
   const todayKey = dateKey(todayStart)
-  const spentToday = costBetween(buckets, todayStart, now, pool)
-  const totals = dailyTotals(buckets, start, end, pool)
+  const spentToday = costBetween(buckets, todayStart, now, pool, fw)
+  const totals = dailyTotals(buckets, start, end, pool, fw)
 
   // Every calendar day the window touches. A mid-day reset anchor (e.g. Wed
   // 15:45) makes the first and last days PARTIAL, so each day's effective
@@ -352,7 +412,7 @@ export function computeState({ buckets, limitEvents, plan, pool = 'standard', no
     overall:
       pool === 'fable'
         ? {
-            spent: costBetween(buckets, start, now, 'all'),
+            spent: costBetween(buckets, start, now, 'all', fw),
             capacity: allCapacity.weeklyUsd,
             share: plan.fableShare ?? 0.5,
           }
@@ -378,10 +438,10 @@ export function computeState({ buckets, limitEvents, plan, pool = 'standard', no
       pct: allowance == null ? null : allowance > 0 ? spentToday / allowance : spentToday > 0 ? 99 : 0,
     },
     block: (() => {
-      const blk = currentBlock(buckets, now, pool, plan.blockAnchor)
+      const blk = currentBlock(buckets, now, pool, plan.blockAnchor, fw)
       const bc = plan.capacity.block || { mode: 'auto', weeklyUsd: null }
       const cap =
-        bc.mode === 'manual' && bc.weeklyUsd ? bc.weeklyUsd : inferBlockCapacity(buckets, now)
+        bc.mode === 'manual' && bc.weeklyUsd ? bc.weeklyUsd : inferBlockCapacity(buckets, now, fw)
       return {
         ...blk,
         capacity: cap,
@@ -401,7 +461,7 @@ export function computeState({ buckets, limitEvents, plan, pool = 'standard', no
  * derivable from the transcripts. The weekly reset anchor is not — nothing in
  * the local data records it, so that one stays a user setting.
  */
-export function currentBlock(buckets, now, pool, anchorISO) {
+export function currentBlock(buckets, now, pool, anchorISO, fw = 1) {
   // A user-supplied anchor beats inference. Roll it forward in 5h steps to the
   // block containing `now`, and only trust it if there was actually activity in
   // that window — after a long idle the real block starts at the next message,
@@ -413,20 +473,20 @@ export function currentBlock(buckets, now, pool, anchorISO) {
       while (endsAt <= now) endsAt = new Date(endsAt.getTime() + 5 * HOUR)
       while (endsAt - 5 * HOUR > now) endsAt = new Date(endsAt.getTime() - 5 * HOUR)
       const since = new Date(endsAt.getTime() - 5 * HOUR)
-      const spent = costBetween(buckets, since, now, pool)
+      const spent = costBetween(buckets, since, now, pool, fw)
       if (spent > 0) {
         return { spent, since: since.toISOString(), endsAt: endsAt.toISOString(), open: true, anchored: true }
       }
     }
   }
-  return inferBlock(buckets, now, pool)
+  return inferBlock(buckets, now, pool, fw)
 }
 
-function inferBlock(buckets, now, pool) {
+function inferBlock(buckets, now, pool, fw = 1) {
   // Must go through bucketCost: 'all' has no `pools` entry of its own, so a
   // direct pools[pool] lookup silently finds nothing and reports no block.
   const hours = Object.keys(buckets)
-    .filter((k) => bucketCost(buckets[k], pool) > 0)
+    .filter((k) => bucketCost(buckets[k], pool, fw) > 0)
     .sort()
   if (!hours.length) return { spent: 0, since: null, endsAt: null, open: false }
 
@@ -450,7 +510,7 @@ function inferBlock(buckets, now, pool) {
   }
 
   return {
-    spent: costBetween(buckets, blockStart, now, pool),
+    spent: costBetween(buckets, blockStart, now, pool, fw),
     since: blockStart.toISOString(),
     endsAt: new Date(blockStart.getTime() + 5 * HOUR).toISOString(),
     open: true,
@@ -461,14 +521,14 @@ function inferBlock(buckets, now, pool) {
  * Capacity of the 5-hour session limit, inferred the same way as the weekly
  * one: the heaviest 5-hour stretch actually sustained, plus headroom.
  */
-export function inferBlockCapacity(buckets, now) {
+export function inferBlockCapacity(buckets, now, fw = 1) {
   const hours = Object.keys(buckets).sort()
   if (!hours.length) return null
   let best = 0
   for (const key of hours) {
     const t = hourKeyToDate(key)
     if (t > now) continue
-    const c = costBetween(buckets, t, new Date(t.getTime() + 5 * HOUR))
+    const c = costBetween(buckets, t, new Date(t.getTime() + 5 * HOUR), 'all', fw)
     if (c > best) best = c
   }
   return best > 0 ? best * 1.15 : null
