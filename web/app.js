@@ -193,6 +193,23 @@ function paintWeekGauge() {
   }
 }
 
+/** Show a meter's current % in its calibration box (unless being edited). */
+function paintCalField(id, s) {
+  const el = $(id)
+  if (document.activeElement === el) return
+  const cap = s?.capacity?.weeklyUsd
+  el.value = cap ? String(Math.round((s.week.spent / cap) * 100)) : ''
+  el.classList.toggle('calibrated', ['manual', 'calibrated-share'].includes(s?.capacity?.source))
+}
+
+function paintBlockCalField() {
+  const el = $('cal-block')
+  if (document.activeElement === el) return
+  const b = all.pools.all.block
+  el.value = b?.open && b.pct != null ? String(Math.round(b.pct * 100)) : ''
+  el.classList.toggle('calibrated', b?.source === 'manual')
+}
+
 function paintSummary() {
   const wStart = new Date(state.week.start)
   const wEnd = new Date(state.week.end)
@@ -262,8 +279,10 @@ function paintSummary() {
     src === 'limit-event'
       ? `pinned by ${state.capacity.pins} real limit hit${state.capacity.pins > 1 ? 's' : ''}`
       : src === 'manual'
-        ? 'set by you'
-        : src === 'derived'
+        ? 'calibrated by you'
+        : src === 'calibrated-share'
+          ? `calibrated — ${Math.round(state.capacity.share * 100)}% of the week`
+          : src === 'derived'
           ? `${Math.round((state.overall?.share ?? 0.5) * 100)}% of the overall limit`
           : src === 'history'
             ? 'heaviest rolling 7 days + 15%'
@@ -280,7 +299,11 @@ function paintSummary() {
     bindEl.parentElement.hidden = true
   }
 
-  $('cal-pool-label').textContent = all.poolMeta[pool].label
+  // Each field shows the meter's CURRENT reading, so re-calibrating is just
+  // correcting a number you can already see rather than recalling one.
+  paintCalField('cal-all', all.pools.all)
+  paintCalField('cal-fable', all.pools.fable)
+  paintBlockCalField()
 
   const rf = Math.round((state.plan.reserveFraction ?? 0) * 100)
   if (document.activeElement !== $('reserve-pct')) $('reserve-pct').value = String(rf)
@@ -492,10 +515,16 @@ function wireSettings() {
     if (Number.isNaN(h)) return
     patchPlan({ weekStart: { ...state.plan.weekStart, hour: h, minute: m || 0 } })
   })
-  $('cal-pct').addEventListener('change', (e) => {
-    if (e.target.value === '') return
-    patchPlan({ calibratePct: Number(e.target.value), calibratePool: pool })
-  })
+  for (const [id, target] of [
+    ['cal-all', 'all'],
+    ['cal-fable', 'fable'],
+    ['cal-block', 'block'],
+  ]) {
+    $(id).addEventListener('change', (e) => {
+      if (e.target.value === '') return
+      patchPlan({ calibratePct: Number(e.target.value), calibratePool: target })
+    })
+  }
   $('reserve-pct').addEventListener('input', (e) => {
     $('reserve-out').textContent = `${e.target.value}%`
   })

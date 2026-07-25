@@ -76,12 +76,6 @@
           at
           <input id="week-time" type="time" step="60" />
         </label>
-        <label title="Run /usage in Claude Code, read this pool's weekly percentage, and type it here. The tool solves for the real limit. Set to 0 to go back to inferring.">
-          Calibrate <b id="cal-pool-label">—</b> — <code>/usage</code> says
-          <input id="cal-pct" type="number" min="0" max="100" step="1" placeholder="%" autocomplete="off" />
-          % this week
-        </label>
-
         <label title="Share of the weekly allowance held back and released near the end of the week to pay down overspend.">
           Reserve
           <input id="reserve-pct" type="range" min="0" max="40" step="1" />
@@ -97,6 +91,26 @@
         <label title="The clock time your current 5-hour block resets, as shown by /usage. Pins the block chain, which can't be reconstructed reliably from transcripts alone.">
           5h block resets at
           <input id="block-reset" type="time" step="60" autocomplete="off" />
+        </label>
+      </section>
+
+      <section class="settings calibrate">
+        <p class="sub cal-intro">
+          Run <code>/usage</code> and type each percentage it reports. Each one is
+          independent — set any, all, or none, whenever they drift. Enter <b>0</b> to
+          go back to inferring that one.
+        </p>
+        <label>
+          Week
+          <input id="cal-all" type="number" min="0" max="100" step="1" placeholder="%" autocomplete="off" />%
+        </label>
+        <label>
+          Fable
+          <input id="cal-fable" type="number" min="0" max="100" step="1" placeholder="%" autocomplete="off" />%
+        </label>
+        <label>
+          5h block
+          <input id="cal-block" type="number" min="0" max="100" step="1" placeholder="%" autocomplete="off" />%
         </label>
       </section>
 

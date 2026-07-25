@@ -96,6 +96,12 @@ h2 { font-size: 15px; margin: 0; letter-spacing: 0.04em; text-transform: upperca
 input[type="range"] { accent-color: var(--accent); width: 120px; }
 .mono { font-family: var(--mono); }
 
+.calibrate { align-items: center; }
+.cal-intro { flex: 1 1 100%; margin: 0 0 4px; }
+.calibrate input { width: 64px; text-align: right; }
+/* A calibrated meter is pinned to something you observed, not inferred. */
+.calibrate input.calibrated { border-color: var(--accent); color: var(--accent); }
+
 .meter {
   position: relative;
   height: 8px;

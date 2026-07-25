@@ -270,7 +270,14 @@ export function computeState({ buckets, limitEvents, plan, pool = 'standard', no
 
   const cap = plan.capacity[pool] || { mode: 'auto', weeklyUsd: null }
   let capacity
-  if (cap.mode === 'manual' && cap.weeklyUsd) {
+  if (cap.mode === 'share' && cap.share > 0) {
+    // A sub-limit is stored as a FRACTION of the overall limit, not an
+    // absolute. That way recalibrating the weekly limit rescales it instead of
+    // leaving the two meters describing different-sized weeks.
+    capacity = allCapacity.weeklyUsd
+      ? { weeklyUsd: allCapacity.weeklyUsd * cap.share, source: 'calibrated-share', share: cap.share }
+      : { weeklyUsd: null, source: 'unknown' }
+  } else if (cap.mode === 'manual' && cap.weeklyUsd) {
     capacity = { weeklyUsd: cap.weeklyUsd, source: 'manual' }
   } else if (pool === 'fable') {
     capacity = allCapacity.weeklyUsd

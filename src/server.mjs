@@ -80,10 +80,19 @@ const server = http.createServer(async (req, res) => {
         const observed = target === 'block' ? st.block.spent : st.week.spent
 
         next.capacity = { ...next.capacity }
-        if (p > 0 && p <= 100 && observed > 0) {
-          next.capacity[target] = { mode: 'manual', weeklyUsd: observed / (p / 100) }
-        } else if (p === 0) {
+        if (p === 0) {
           next.capacity[target] = { mode: 'auto', weeklyUsd: null }
+        } else if (p > 0 && p <= 100 && observed > 0) {
+          const implied = observed / (p / 100)
+          if (target === 'fable') {
+            // Store the sub-limit as a share so it tracks the weekly limit.
+            const overall = st.overall?.capacity
+            next.capacity.fable = overall
+              ? { mode: 'share', share: implied / overall }
+              : { mode: 'manual', weeklyUsd: implied }
+          } else {
+            next.capacity[target] = { mode: 'manual', weeklyUsd: implied }
+          }
         }
       }
 
