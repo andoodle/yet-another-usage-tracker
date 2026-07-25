@@ -13,6 +13,11 @@ export const DEFAULT_PLAN = {
   weekdayWeights: { 0: 0.4, 1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 0.4 },
   // Date-specific overrides, "YYYY-MM-DD" -> weight. Set by dragging the calendar.
   dayOverrides: {},
+  // Fraction of weekly capacity held back and only released near the end of
+  // the window. Pays down accumulated debt instead of throttling you silently.
+  reserveFraction: 0.15,
+  // Reserve unlocks once this many days (including today) remain.
+  reserveReleaseDays: 2,
 }
 
 export async function loadPlan() {
@@ -127,30 +132,71 @@ export function weightFor(plan, date) {
 }
 
 /**
- * Decide how much of the REMAINING weekly budget today gets.
+ * BUFFER + DEBT hybrid allocation.
  *
- * `remaining` is capacity minus everything already spent this week, and
- * `weights` covers today plus every day left in the window. Returning a
- * proportional share is the "strict" reading: overspend yesterday and every
- * remaining day shrinks automatically, so the week can never blow past the cap.
+ * The two policies compose because they solve opposite halves of the problem:
  *
- * TODO(you): this is the one genuinely opinionated decision in the tool, and
- * it changes what the dashboard tells you to do. Three defensible policies:
+ *   BASELINE — each day's share is computed ONCE from the whole week's weights
+ *     over (capacity − reserve). It does not move when you overspend, which is
+ *     what makes the overspend visible instead of silently repricing later days.
  *
- *   1. STRICT (implemented below) — self-correcting, never overruns, but one
- *      heavy day quietly punishes every day after it with no warning.
- *   2. DEBT — keep each day's original allocation and show the overspend as a
- *      running deficit. Honest about *why* you're short; can still overrun.
- *   3. BUFFER — hold back N% of capacity as reserve, allocate from the rest,
- *      and only release the reserve in the last day or two of the week.
+ *   DEBT — cumulative (actually spent) − (baseline) through yesterday. Positive
+ *     means you're borrowing. It's reported as a number rather than absorbed.
  *
- * Which one you want depends on whether you'd rather be silently throttled or
- * loudly warned. Edit this function to change it.
+ *   RESERVE — held back all week, unlocked when `reserveReleaseDays` remain.
+ *     Its whole job is to pay debt down late, so a heavy Tuesday doesn't
+ *     throttle Friday.
+ *
+ * Remaining days are then adjusted by (releasedReserve − debt), split by weight.
+ * A hard cap keeps the week from exceeding capacity regardless.
+ *
+ * @returns {{planned: Record<string, number>, debt: number, reserve: {total: number, released: boolean}, throttled: boolean}}
  */
-export function todaysAllowance({ remaining, weights }) {
-  const totalWeight = weights.reduce((a, b) => a + b, 0)
-  if (totalWeight <= 0) return remaining
-  return (remaining * weights[0]) / totalWeight
+export function allocate({ capacity, plan, days, spentByDay, todayKey }) {
+  const reserveTotal = capacity * plan.reserveFraction
+  const allocatable = capacity - reserveTotal
+
+  const totalWeekWeight = days.reduce((a, d) => a + d.weight, 0)
+  const baseline = {}
+  for (const d of days) {
+    baseline[d.date] = totalWeekWeight > 0 ? (allocatable * d.weight) / totalWeekWeight : 0
+  }
+
+  const past = days.filter((d) => d.date < todayKey)
+  const remainingDays = days.filter((d) => d.date >= todayKey)
+
+  const spentPast = past.reduce((a, d) => a + (spentByDay[d.date] || 0), 0)
+  const baselinePast = past.reduce((a, d) => a + baseline[d.date], 0)
+  const debt = spentPast - baselinePast
+
+  const released = remainingDays.length <= plan.reserveReleaseDays
+  const adjustPool = (released ? reserveTotal : 0) - debt
+
+  const remWeight = remainingDays.reduce((a, d) => a + d.weight, 0)
+  const planned = {}
+  for (const d of remainingDays) {
+    const share = remWeight > 0 ? (adjustPool * d.weight) / remWeight : 0
+    planned[d.date] = Math.max(0, baseline[d.date] + share)
+  }
+
+  // Hard ceiling: nothing left to allocate beyond what the week actually has.
+  // Measured against yesterday's close so today's own spend isn't double-counted.
+  const trueRemaining = Math.max(0, capacity - spentPast)
+  const sumPlanned = Object.values(planned).reduce((a, b) => a + b, 0)
+  let throttled = false
+  if (sumPlanned > trueRemaining && sumPlanned > 0) {
+    throttled = true
+    const scale = trueRemaining / sumPlanned
+    for (const k of Object.keys(planned)) planned[k] *= scale
+  }
+
+  return {
+    planned,
+    baseline,
+    debt,
+    reserve: { total: reserveTotal, released },
+    throttled,
+  }
 }
 
 /** Build the full dashboard state. */
@@ -166,68 +212,90 @@ export function computeState({ buckets, limitEvents, plan, now = new Date() }) {
 
   const remaining = capacity.weeklyUsd == null ? null : Math.max(0, capacity.weeklyUsd - spentWeek)
 
-  // Days from today through the end of the window.
-  const days = []
-  const cursor = new Date(now)
-  cursor.setHours(0, 0, 0, 0)
-  while (cursor < end) {
-    days.push(new Date(cursor))
-    cursor.setDate(cursor.getDate() + 1)
-  }
-  const weights = days.map((d) => weightFor(plan, d))
-
-  const allowance = remaining == null ? null : todaysAllowance({ remaining, weights })
-
   const todayStart = new Date(now)
   todayStart.setHours(0, 0, 0, 0)
+  const todayKey = dateKey(todayStart)
   const spentToday = costBetween(buckets, todayStart, now)
+  const totals = dailyTotals(buckets, start, end)
 
-  // Every day in the window (including past ones) for the calendar UI.
-  const perDay = []
+  // Every day in the window, past and future.
+  const days = []
   const wc = new Date(start)
   wc.setHours(0, 0, 0, 0)
-  const totals = dailyTotals(buckets, start, end)
-  const totalWeight = weights.reduce((a, b) => a + b, 0)
   while (wc < end) {
-    const k = dateKey(wc)
-    const isPast = wc < todayStart
-    const isToday = k === dateKey(todayStart)
-    const w = weightFor(plan, wc)
-    let planned = null
-    if (remaining != null && !isPast && totalWeight > 0) {
-      planned = (remaining * w) / totalWeight
-    }
-    perDay.push({
-      date: k,
-      dow: wc.getDay(),
-      weight: w,
-      spent: totals[k] || 0,
-      planned,
-      isPast,
-      isToday,
-    })
+    days.push({ date: dateKey(wc), dow: wc.getDay(), weight: weightFor(plan, wc) })
     wc.setDate(wc.getDate() + 1)
   }
 
-  // The 5-hour rolling block is what actually bites first in practice.
-  const blockFrom = new Date(now.getTime() - 5 * HOUR)
-  const spentBlock = costBetween(buckets, blockFrom, now)
+  const alloc =
+    capacity.weeklyUsd == null
+      ? null
+      : allocate({ capacity: capacity.weeklyUsd, plan, days, spentByDay: totals, todayKey })
+
+  const perDay = days.map((d) => ({
+    ...d,
+    spent: totals[d.date] || 0,
+    planned: alloc ? (alloc.planned[d.date] ?? null) : null,
+    baseline: alloc ? alloc.baseline[d.date] : null,
+    isPast: d.date < todayKey,
+    isToday: d.date === todayKey,
+  }))
+
+  const allowance = alloc ? alloc.planned[todayKey] : null
 
   return {
     now: now.toISOString(),
     week: { start: start.toISOString(), end: end.toISOString(), spent: spentWeek },
     capacity,
     remaining,
+    debt: alloc ? alloc.debt : null,
+    reserve: alloc ? alloc.reserve : null,
+    throttled: alloc ? alloc.throttled : false,
     today: {
-      date: dateKey(todayStart),
+      date: todayKey,
       spent: spentToday,
       allowance,
+      baseline: alloc ? alloc.baseline[todayKey] : null,
       // A zero allowance with spend against it is "over", not "unknown".
       pct: allowance == null ? null : allowance > 0 ? spentToday / allowance : spentToday > 0 ? 99 : 0,
     },
-    block5h: { spent: spentBlock, since: blockFrom.toISOString() },
+    block: currentBlock(buckets, now),
     perDay,
     limitEvents: limitEvents.slice(-5),
     plan,
+  }
+}
+
+/**
+ * The 5-hour session block. Its start is INFERRED, not configured: a block
+ * begins at the first activity following a gap of >= 5h. That boundary is
+ * derivable from the transcripts. The weekly reset anchor is not — nothing in
+ * the local data records it, so that one stays a user setting.
+ */
+export function currentBlock(buckets, now) {
+  const hours = Object.keys(buckets)
+    .filter((k) => buckets[k].cost > 0)
+    .sort()
+  if (!hours.length) return { spent: 0, since: null, endsAt: null, open: false }
+
+  // Blocks ROLL: a new one starts either after an idle gap or once the current
+  // block's 5 hours elapse. Anchoring only on idle gaps means a long continuous
+  // session never rolls over and the block reads as permanently expired.
+  let blockStart = null
+  for (const key of hours) {
+    const t = hourKeyToDate(key)
+    if (blockStart == null || t - blockStart >= 5 * HOUR) blockStart = t
+  }
+
+  // The most recent block may already have expired.
+  if (!blockStart || now - blockStart >= 5 * HOUR) {
+    return { spent: 0, since: null, endsAt: null, open: false }
+  }
+
+  return {
+    spent: costBetween(buckets, blockStart, now),
+    since: blockStart.toISOString(),
+    endsAt: new Date(blockStart.getTime() + 5 * HOUR).toISOString(),
+    open: true,
   }
 }

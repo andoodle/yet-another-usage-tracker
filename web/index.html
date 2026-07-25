@@ -25,23 +25,25 @@
         </div>
 
         <dl class="stats">
-          <div><dt>Week spent</dt><dd id="week-spent">—</dd></div>
-          <div><dt>Week remaining</dt><dd id="week-remaining">—</dd></div>
-          <div><dt>Last 5 hours</dt><dd id="block-spent">—</dd></div>
-          <div><dt>Capacity basis</dt><dd id="capacity-source" class="small">—</dd></div>
+          <div><dt>Week used</dt><dd id="week-spent">—</dd></div>
+          <div><dt>Week left</dt><dd id="week-remaining">—</dd></div>
+          <div><dt>Running balance</dt><dd id="debt">—</dd></div>
+          <div><dt>Reserve</dt><dd id="reserve">—</dd></div>
+          <div><dt>5-hour block</dt><dd id="block-spent">—</dd></div>
+          <div><dt>Limit estimate</dt><dd id="capacity-source" class="small">—</dd></div>
         </dl>
       </section>
 
       <section class="planner">
         <div class="planner-head">
           <h2>Coding availability</h2>
-          <p class="sub">Drag a column up or down to change how much of the week's budget that day gets. Away days hand their share to the rest.</p>
+          <p class="sub">Drag a column up or down (or scroll over it) to set how available you are that day. The shaded fill is availability; the solid bar is what you've actually used against that day's share. Double-click resets a day.</p>
         </div>
         <div class="week" id="week"></div>
         <div class="legend">
-          <span><i class="swatch planned"></i> allocated</span>
-          <span><i class="swatch spent"></i> actually used</span>
-          <span><i class="swatch over"></i> over allocation</span>
+          <span><i class="swatch planned"></i> availability</span>
+          <span><i class="swatch spent"></i> used vs that day's share</span>
+          <span><i class="swatch over"></i> over that day's share</span>
         </div>
       </section>
 
@@ -60,17 +62,19 @@
           at
           <input id="week-hour" type="number" min="0" max="23" step="1" />:00
         </label>
-        <label>
-          Weekly capacity
-          <select id="cap-mode">
-            <option value="auto">Infer from my history</option>
-            <option value="manual">Set manually</option>
-          </select>
-          <input id="cap-value" type="number" min="0" step="1" placeholder="weighted $" />
+        <label title="Run /usage in Claude Code, read the weekly percentage, and type it here. The tool solves for your real limit from it. Set to 0 to go back to inferring.">
+          Calibrate — <code>/usage</code> says I'm at
+          <input id="cal-pct" type="number" min="0" max="100" step="1" placeholder="%" />
+          % this week
         </label>
       </section>
 
-      <p class="footnote" id="footnote"></p>
+      <p class="footnote" id="footnote">
+        Percentages are shares of your weekly subscription allowance, derived from local
+        Claude Code transcripts — not API billing, which you don't pay. The absolute limit is
+        an estimate until you calibrate it above or actually hit a limit; the split between
+        days is accurate either way.
+      </p>
     </main>
     <script src="/app.js" type="module"></script>
   </body>

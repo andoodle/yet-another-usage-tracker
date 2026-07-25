@@ -54,7 +54,24 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/plan' && req.method === 'POST') {
       const body = await readBody(req)
-      const plan = await savePlan({ ...(await loadPlan()), ...body })
+      let next = { ...(await loadPlan()), ...body }
+
+      // Calibration in the user's own units: they read a "% used this week"
+      // off /usage, and we solve for the capacity that makes it true. No
+      // dollars involved — the subscription has no dollar meter.
+      if (body.calibratePct != null) {
+        delete next.calibratePct
+        const pct = Number(body.calibratePct)
+        const { buckets: b2, limitEvents: l2 } = await getScan()
+        const st = computeState({ buckets: b2, limitEvents: l2, plan: next })
+        if (pct > 0 && pct <= 100 && st.week.spent > 0) {
+          next.capacity = { mode: 'manual', weeklyUsd: st.week.spent / (pct / 100) }
+        } else if (pct === 0) {
+          next.capacity = { mode: 'auto', weeklyUsd: null }
+        }
+      }
+
+      const plan = await savePlan(next)
       const { buckets, limitEvents, fileCount } = await getScan()
       return json(res, 200, { ...computeState({ buckets, limitEvents, plan }), fileCount })
     }

@@ -112,29 +112,46 @@ h2 { font-size: 15px; margin: 0; letter-spacing: 0.04em; text-transform: upperca
   border-radius: 8px;
   overflow: hidden;
   cursor: ns-resize;
+  touch-action: none; /* let the drag own vertical gestures */
 }
-.day.past .track { cursor: default; opacity: 0.65; }
+.day.past .track { cursor: default; opacity: 0.55; }
 .day.today .track { border-color: var(--accent); }
+.day.dragging .track { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(216, 166, 87, 0.18); }
 
-.track .planned-bar,
+/* Wide translucent fill = availability. This is the surface the drag controls. */
+.track .avail {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  background: rgba(216, 166, 87, 0.20);
+  border-top: 1px solid rgba(216, 166, 87, 0.55);
+  transition: height 0.08s linear;
+}
+.day.dragging .avail { transition: none; }
+
+/* Narrow solid bar = usage, measured against that day's own allocation. */
 .track .spent-bar {
   position: absolute;
-  left: 0;
-  right: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 44%;
   bottom: 0;
+  background: var(--accent);
+  border-radius: 3px 3px 0 0;
   transition: height 0.15s ease;
 }
-.track .planned-bar { background: rgba(216, 166, 87, 0.22); }
-.track .spent-bar { background: var(--accent); opacity: 0.85; }
 .track .spent-bar.over { background: var(--bad); }
 
-.track .cap-line {
+.track .level {
   position: absolute;
-  left: 0; right: 0;
-  height: 2px;
-  background: var(--accent);
-  opacity: 0.9;
+  top: 6px; left: 0; right: 0;
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  pointer-events: none;
 }
+.day.dragging .level { color: var(--accent); }
 
 .day .name { text-align: center; font-size: 12px; color: var(--muted); }
 .day .name b { display: block; color: var(--fg); font-weight: 600; }
@@ -146,6 +163,11 @@ h2 { font-size: 15px; margin: 0; letter-spacing: 0.04em; text-transform: upperca
 .swatch.planned { background: rgba(216, 166, 87, 0.22); }
 .swatch.spent { background: var(--accent); }
 .swatch.over { background: var(--bad); }
+
+.stats dd.good { color: var(--good); }
+.stats dd.bad { color: var(--bad); }
+.gauge-value .of { display: block; font-size: 13px; margin: 4px 0 0; }
+code { font-family: var(--mono); font-size: 12px; color: var(--fg); }
 
 .settings { margin-top: 24px; display: flex; flex-wrap: wrap; gap: 24px; font-size: 13px; color: var(--muted); }
 .settings label { display: flex; align-items: center; gap: 8px; }

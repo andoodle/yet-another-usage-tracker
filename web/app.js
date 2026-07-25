@@ -1,59 +1,124 @@
 const $ = (id) => document.getElementById(id)
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MAX_WEIGHT = 2
+const STEP = 0.1
 
 let state = null
+let dragging = null // { date, el } while a gesture is live
+const cells = new Map() // date -> { el, avail, spent, name, amt, label }
 
-const usd = (n) =>
-  n == null ? '—' : n >= 100 ? `$${n.toFixed(0)}` : n >= 10 ? `$${n.toFixed(1)}` : `$${n.toFixed(2)}`
+// Everything is expressed as a share of the WEEKLY ALLOWANCE. The underlying
+// unit is a weighted token cost, but on a subscription there is no dollar
+// meter — showing API prices would be a number that means nothing here.
+const capacityUnits = () => state?.capacity?.weeklyUsd ?? null
+
+const pct = (n) => {
+  const cap = capacityUnits()
+  if (n == null || !cap) return '—'
+  const v = (n / cap) * 100
+  if (v > 0 && v < 0.1) return '<0.1%'
+  return `${v < 10 ? v.toFixed(1) : v.toFixed(0)}%`
+}
+
+const signedPct = (n) => {
+  const cap = capacityUnits()
+  if (n == null || !cap) return '—'
+  const v = (n / cap) * 100
+  return `${v >= 0 ? '+' : '−'}${Math.abs(v) < 10 ? Math.abs(v).toFixed(1) : Math.abs(v).toFixed(0)}%`
+}
+
+const LEVELS = [
+  [0, 'away'],
+  [0.5, 'light'],
+  [1, 'normal'],
+  [1.5, 'heavy'],
+  [2, 'max'],
+]
+const levelName = (w) =>
+  LEVELS.reduce((best, [v, n]) => (Math.abs(v - w) < Math.abs(best[0] - w) ? [v, n] : best), LEVELS[0])[1]
 
 async function load(fresh = false) {
   const res = await fetch(`/api/state${fresh ? '?fresh=1' : ''}`)
-  state = await res.json()
-  render()
+  apply(await res.json())
 }
 
+let postSeq = 0
 async function patchPlan(patch) {
+  const seq = ++postSeq
   const res = await fetch('/api/plan', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(patch),
   })
-  state = await res.json()
-  render()
+  const next = await res.json()
+  // Ignore responses that a newer in-flight save has already superseded.
+  if (seq === postSeq) apply(next)
+}
+
+function apply(next) {
+  state = next
+  paintSummary()
+  syncWeekDom()
+  paintWeek()
 }
 
 function verdictFor(pct) {
   if (pct == null) return ['Not enough history to pace yet.', '']
-  if (pct < 0.6) return [`${Math.round(pct * 100)}% of today's share used — comfortable.`, 'good']
-  if (pct < 0.95) return [`${Math.round(pct * 100)}% of today's share used — on pace.`, 'warn']
-  if (pct < 1.4) return [`${Math.round(pct * 100)}% of today's share — you're borrowing from later in the week.`, 'warn']
-  return [`${Math.round(pct * 100)}% of today's share — well over; later days just shrank.`, 'bad']
+  if (pct >= 99) return ["Today's allocation is exhausted.", 'bad']
+  const p = Math.round(pct * 100)
+  if (pct < 0.6) return [`${p}% of today's share used — comfortable.`, 'good']
+  if (pct < 0.95) return [`${p}% of today's share used — on pace.`, 'warn']
+  if (pct < 1.4) return [`${p}% of today's share — borrowing from later in the week.`, 'warn']
+  return [`${p}% of today's share — well over.`, 'bad']
 }
 
-function render() {
-  if (!state) return
-
+function paintSummary() {
   const wStart = new Date(state.week.start)
   const wEnd = new Date(state.week.end)
   const fmt = (d) => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-  $('window-label').textContent = `Week of ${fmt(wStart)} – ${fmt(new Date(wEnd - 1))} · ${state.fileCount} transcripts scanned`
+  $('window-label').textContent =
+    `Week of ${fmt(wStart)} – ${fmt(new Date(wEnd - 1))} · ${state.fileCount} transcripts scanned`
 
-  $('today-spent').textContent = usd(state.today.spent)
-  $('today-allow').textContent = state.today.allowance == null ? '' : `/ ${usd(state.today.allowance)}`
+  // Headline is "how much of today's share is gone", which is the number that
+  // actually decides whether to keep working.
+  const used = state.today.pct
+  $('today-spent').textContent = used == null ? '—' : `${Math.min(999, Math.round(used * 100))}%`
+  $('today-allow').textContent =
+    state.today.allowance == null ? '' : `of today's share (${pct(state.today.allowance)} of week)`
 
-  const pct = state.today.pct
   const meter = $('today-meter')
-  meter.style.width = `${Math.min(100, (pct ?? 0) * 100)}%`
-  meter.style.background = pct == null ? 'var(--muted)' : pct < 0.6 ? 'var(--good)' : pct < 1 ? 'var(--warn)' : 'var(--bad)'
+  meter.style.width = `${Math.min(100, (used ?? 0) * 100)}%`
+  meter.style.background =
+    used == null ? 'var(--muted)' : used < 0.6 ? 'var(--good)' : used < 1 ? 'var(--warn)' : 'var(--bad)'
 
-  const [text, cls] = verdictFor(pct)
+  const [text, cls] = verdictFor(used)
   $('verdict').textContent = text
   $('verdict').className = `verdict ${cls}`
 
-  $('week-spent').textContent = usd(state.week.spent)
-  $('week-remaining').textContent = usd(state.remaining)
-  $('block-spent').textContent = usd(state.block5h.spent)
+  $('week-spent').textContent = pct(state.week.spent)
+  $('week-remaining').textContent = pct(state.remaining)
+
+  // Debt / reserve — the two halves of the hybrid policy, stated explicitly.
+  const debtEl = $('debt')
+  if (state.debt == null) {
+    debtEl.textContent = '—'
+    debtEl.className = ''
+  } else if (state.debt > 0) {
+    debtEl.textContent = `${signedPct(-state.debt)} behind plan`
+    debtEl.className = 'bad'
+  } else {
+    debtEl.textContent = `${signedPct(-state.debt)} ahead of plan`
+    debtEl.className = 'good'
+  }
+
+  $('reserve').textContent = state.reserve
+    ? `${pct(state.reserve.total)} ${state.reserve.released ? 'released' : 'held back'}`
+    : '—'
+
+  const blk = state.block
+  $('block-spent').textContent = blk?.open
+    ? `${pct(blk.spent)} · resets ${new Date(blk.endsAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+    : 'none open'
 
   const src = state.capacity.source
   $('capacity-source').textContent =
@@ -67,106 +132,178 @@ function render() {
 
   $('week-dow').value = String(state.plan.weekStart.dow)
   $('week-hour').value = String(state.plan.weekStart.hour)
-  $('cap-mode').value = state.plan.capacity.mode
-  $('cap-value').value = state.plan.capacity.weeklyUsd ?? ''
-  $('cap-value').disabled = state.plan.capacity.mode !== 'manual'
-
-  renderWeek()
-
-  $('footnote').textContent =
-    'Cost is a weighted proxy for subscription-limit consumption (output ≫ cache-write ≫ cache-read), not a bill. ' +
-    'Absolute percentages drift; the relative split between days is what paces you.'
+  if (document.activeElement !== $('cal-pct')) {
+    $('cal-pct').value =
+      state.plan.capacity.mode === 'manual' && capacityUnits()
+        ? Math.round((state.week.spent / capacityUnits()) * 100)
+        : ''
+  }
 }
 
-function renderWeek() {
+/** Create day columns once. Rebuild only when the set of dates changes. */
+function syncWeekDom() {
   const host = $('week')
-  host.innerHTML = ''
-
-  const scale = Math.max(
-    0.01,
-    ...state.perDay.map((d) => Math.max(d.spent, d.planned || 0)),
-  )
+  const wanted = state.perDay.map((d) => d.date).join(',')
+  if (host.dataset.key === wanted) return
+  host.dataset.key = wanted
+  host.textContent = ''
+  cells.clear()
 
   for (const day of state.perDay) {
     const el = document.createElement('div')
-    el.className = 'day' + (day.isPast ? ' past' : '') + (day.isToday ? ' today' : '') + (day.weight === 0 ? ' away' : '')
+    el.className = 'day'
     el.dataset.date = day.date
 
     const track = document.createElement('div')
     track.className = 'track'
 
-    const plannedH = day.planned == null ? 0 : (day.planned / scale) * 100
-    const spentH = (day.spent / scale) * 100
-    const over = day.planned != null && day.spent > day.planned
+    const avail = document.createElement('div')
+    avail.className = 'avail'
 
-    track.innerHTML = `
-      <div class="planned-bar" style="height:${Math.min(100, plannedH)}%"></div>
-      <div class="spent-bar${over ? ' over' : ''}" style="height:${Math.min(100, spentH)}%"></div>
-      ${day.planned == null ? '' : `<div class="cap-line" style="bottom:${Math.min(100, plannedH)}%"></div>`}
-    `
+    const spent = document.createElement('div')
+    spent.className = 'spent-bar'
+
+    const label = document.createElement('div')
+    label.className = 'level'
+
+    track.append(avail, spent, label)
 
     const name = document.createElement('div')
     name.className = 'name'
-    const dowEl = document.createElement('b')
-    dowEl.textContent = DOW[day.dow]
-    name.append(dowEl, document.createTextNode(day.date.slice(5)))
+    const b = document.createElement('b')
+    b.textContent = DOW[day.dow]
+    name.append(b, document.createTextNode(day.date.slice(5)))
 
     const amt = document.createElement('div')
     amt.className = 'amt'
-    amt.textContent = day.isPast
-      ? usd(day.spent)
-      : `${usd(day.spent)} / ${day.planned == null ? '—' : usd(day.planned)}`
 
     el.append(track, name, amt)
-    if (!day.isPast) attachDrag(el, track, day)
     host.append(el)
+    cells.set(day.date, { el, track, avail, spent, name, amt, label })
+
+    if (!day.isPast) attachDrag(track, day.date)
   }
 }
 
-function attachDrag(el, track, day) {
-  let dragging = false
-  let startY = 0
-  let startWeight = day.weight
+/** Update sizes/text in place. Safe to call mid-drag. */
+function paintWeek() {
+  for (const day of state.perDay) {
+    const c = cells.get(day.date)
+    if (!c) continue
 
-  const apply = (w) => {
-    const clamped = Math.max(0, Math.min(MAX_WEIGHT, Math.round(w * 10) / 10))
-    el.classList.toggle('away', clamped === 0)
-    return clamped
+    const weight = dragging?.date === day.date ? dragging.weight : day.weight
+    // Past days have no forward allocation, so they're judged against the
+    // baseline they were originally given — otherwise an overspent Tuesday
+    // renders the same colour as a day that stayed within its share.
+    const ref = day.planned ?? day.baseline
+    const over = ref > 0 && day.spent > ref
+
+    c.el.className =
+      'day' +
+      (day.isPast ? ' past' : '') +
+      (day.isToday ? ' today' : '') +
+      (!day.isPast && weight === 0 ? ' away' : '') +
+      (dragging?.date === day.date ? ' dragging' : '')
+
+    // Wide translucent fill = availability. This is what the drag manipulates,
+    // so the gesture has a direct 1:1 visual it controls.
+    c.avail.style.height = day.isPast ? '0%' : `${(weight / MAX_WEIGHT) * 100}%`
+
+    // Narrow solid bar = usage, measured against that day's own allocation.
+    const frac = ref > 0 ? Math.min(1.15, day.spent / ref) : 0
+    c.spent.style.height = `${frac * 100}%`
+    c.spent.classList.toggle('over', over)
+
+    c.label.textContent = day.isPast ? '' : levelName(weight)
+    c.amt.textContent = day.isPast
+      ? pct(day.spent)
+      : `${pct(day.spent)} / ${day.planned == null ? '—' : pct(day.planned)}`
+  }
+}
+
+function attachDrag(track, date) {
+  let startY = 0
+  let startWeight = 1
+  let moved = false
+  let pending = null
+
+  const current = () => state.perDay.find((d) => d.date === date)
+
+  const commit = (final) => {
+    const overrides = { ...state.plan.dayOverrides, [date]: dragging.weight }
+    if (final) {
+      const w = dragging.weight
+      dragging = null
+      patchPlan({ dayOverrides: { ...state.plan.dayOverrides, [date]: w } })
+    } else {
+      patchPlan({ dayOverrides: overrides })
+    }
   }
 
   const onMove = (e) => {
     if (!dragging) return
     e.preventDefault()
-    const y = e.touches ? e.touches[0].clientY : e.clientY
-    // 190px of track spans the full 0..MAX_WEIGHT range.
-    const delta = ((startY - y) / 190) * MAX_WEIGHT
-    day.weight = apply(startWeight + delta)
-    track.querySelector('.planned-bar').style.opacity = 0.4 + day.weight * 0.25
+    const delta = ((startY - e.clientY) / track.offsetHeight) * MAX_WEIGHT
+    const w = Math.max(0, Math.min(MAX_WEIGHT, Math.round((startWeight + delta) / STEP) * STEP))
+    if (Math.abs(w - dragging.weight) > 1e-9) {
+      dragging.weight = Number(w.toFixed(2))
+      moved = true
+      paintWeek()
+      // Throttle server round-trips so other columns update live without
+      // flooding the socket on every pixel.
+      if (!pending) pending = setTimeout(() => { pending = null; if (dragging) commit(false) }, 120)
+    }
   }
 
-  const onUp = () => {
+  const onUp = (e) => {
     if (!dragging) return
-    dragging = false
     window.removeEventListener('pointermove', onMove)
     window.removeEventListener('pointerup', onUp)
-    patchPlan({
-      dayOverrides: { ...state.plan.dayOverrides, [day.date]: day.weight },
-    })
+    window.removeEventListener('pointercancel', onUp)
+    if (pending) { clearTimeout(pending); pending = null }
+    try { track.releasePointerCapture(e.pointerId) } catch {}
+    if (moved) commit(true)
+    else { dragging = null; paintWeek() }
   }
 
   track.addEventListener('pointerdown', (e) => {
-    dragging = true
+    if (e.button !== 0) return
+    e.preventDefault()
+    const day = current()
+    if (!day) return
     startY = e.clientY
     startWeight = day.weight
-    track.setPointerCapture?.(e.pointerId)
+    moved = false
+    dragging = { date, weight: day.weight }
+
+    // Listen on window so the gesture keeps working when the cursor leaves the
+    // column. Pointer capture is a nice-to-have on top — it must NOT be able to
+    // abort setup, or a throw here silently kills the whole drag.
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
+    try { track.setPointerCapture(e.pointerId) } catch {}
+
+    paintWeek()
   })
+
+  // Wheel over a column nudges it — easier than dragging for small tweaks.
+  track.addEventListener(
+    'wheel',
+    (e) => {
+      e.preventDefault()
+      const day = current()
+      if (!day) return
+      const w = Math.max(0, Math.min(MAX_WEIGHT, day.weight + (e.deltaY < 0 ? STEP : -STEP)))
+      patchPlan({ dayOverrides: { ...state.plan.dayOverrides, [date]: Number(w.toFixed(2)) } })
+    },
+    { passive: false },
+  )
 
   // Double-click clears the override back to the weekday default.
   track.addEventListener('dblclick', () => {
     const next = { ...state.plan.dayOverrides }
-    delete next[day.date]
+    delete next[date]
     patchPlan({ dayOverrides: next })
   })
 }
@@ -178,12 +315,11 @@ $('week-dow').addEventListener('change', (e) =>
 $('week-hour').addEventListener('change', (e) =>
   patchPlan({ weekStart: { ...state.plan.weekStart, hour: Number(e.target.value) } }),
 )
-$('cap-mode').addEventListener('change', (e) =>
-  patchPlan({ capacity: { ...state.plan.capacity, mode: e.target.value } }),
-)
-$('cap-value').addEventListener('change', (e) =>
-  patchPlan({ capacity: { mode: 'manual', weeklyUsd: Number(e.target.value) || null } }),
-)
+$('cal-pct').addEventListener('change', (e) => {
+  const v = e.target.value === '' ? null : Number(e.target.value)
+  if (v == null) return
+  patchPlan({ calibratePct: v })
+})
 
 load()
-setInterval(() => load(), 60_000)
+setInterval(() => { if (!dragging) load() }, 60_000)
