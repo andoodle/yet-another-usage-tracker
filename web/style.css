@@ -238,7 +238,8 @@ code { font-family: var(--mono); font-size: 12px; color: var(--fg); }
 
 .settings { margin-top: 24px; display: flex; flex-wrap: wrap; gap: 24px; font-size: 13px; color: var(--muted); }
 .settings label { display: flex; align-items: center; gap: 8px; }
-select, input[type="number"] {
+select, input[type="number"], input[type="time"] {
+  color-scheme: dark; /* keeps the native time picker's own chrome on-theme */
   background: var(--surface-2);
   color: var(--fg);
   border: 1px solid var(--line);
@@ -250,3 +251,55 @@ select, input[type="number"] {
 input[type="number"] { width: 90px; }
 
 .footnote { margin-top: 24px; color: var(--muted); font-size: 12px; }
+
+/* Blocking setup dialog. Covers the page rather than sitting beside it: an
+   uncalibrated dashboard is all dashes, so there is nothing behind this worth
+   reading until the numbers are in. */
+.modal-veil {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 9, 7, 0.82);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 10;
+}
+.modal-veil[hidden] { display: none; }
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 28px;
+  max-width: 520px;
+  width: 100%;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+.modal h2 { color: var(--fg); text-transform: none; letter-spacing: -0.01em; font-size: 19px; }
+.modal .sub { margin-top: 10px; }
+.setup-row { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 18px; font-size: 13px; color: var(--muted); }
+.setup-row label { display: flex; align-items: center; gap: 8px; }
+.setup-error { margin: 14px 0 0; color: var(--bad); font-size: 13px; }
+.setup-error[hidden] { display: none; }
+.setup-actions { margin-top: 22px; display: flex; align-items: center; gap: 16px; }
+.setup-actions button {
+  background: var(--accent);
+  color: #17150f;
+  border: 0;
+  border-radius: 6px;
+  padding: 9px 18px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.setup-actions button:disabled { opacity: 0.5; cursor: default; }
+.setup-actions .link {
+  background: transparent;
+  color: var(--muted);
+  padding: 9px 0;
+  font-weight: 400;
+  text-decoration: underline;
+}
+.setup-actions .link:hover { color: var(--fg); }
+.setup-actions .link[hidden] { display: none; }

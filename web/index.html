@@ -96,9 +96,10 @@
 
       <section class="settings calibrate">
         <p class="sub cal-intro">
-          Run <code>/usage</code> and type each percentage it reports. Each one is
-          independent — set any, all, or none, whenever they drift. Enter <b>0</b> to
-          go back to inferring that one.
+          Run <code>/usage</code> and type each percentage it reports. Week and Fable are
+          solved <b>together</b> — entering one alone can't determine either, so the tool
+          waits for the second. The 5-hour block is independent. Enter <b>0</b> to clear
+          and go back to inferring.
         </p>
         <label>
           Week
@@ -121,6 +122,63 @@
         days is accurate either way.
       </p>
     </main>
+
+    <!--
+      Blocking setup. Until a real /usage reading exists the tool has no idea how
+      big your limit is, so every percentage behind this is a dash — a dashboard
+      with nothing on it. Rather than render that and hope you find the settings,
+      collect the numbers up front. Both percentages are required together: the
+      weekly limit and the Fable weight are two unknowns in one pair of equations,
+      and one reading can't determine either.
+    -->
+    <div class="modal-veil" id="setup" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="setup-title">
+        <h2 id="setup-title">Calibrate before you start</h2>
+        <p class="sub">
+          Run <code>/usage</code> in Claude Code and copy two numbers across. Without
+          them this tool can measure how much you've used but not how much you're
+          allowed, so every percentage reads <b>—</b>.
+        </p>
+
+        <div class="setup-row">
+          <label>Week resets
+            <select id="setup-dow">
+              <option value="0">Sunday</option>
+              <option value="1">Monday</option>
+              <option value="2">Tuesday</option>
+              <option value="3">Wednesday</option>
+              <option value="4">Thursday</option>
+              <option value="5">Friday</option>
+              <option value="6">Saturday</option>
+            </select>
+          </label>
+          <label>at <input id="setup-time" type="time" step="60" autocomplete="off" /></label>
+        </div>
+        <p class="sub small">
+          Match this to the reset moment <code>/usage</code> shows. The percentages below
+          describe that window — if the window is wrong, so is everything solved from it.
+        </p>
+
+        <div class="setup-row">
+          <label>Week used
+            <input id="setup-week" type="number" min="1" max="100" step="1" placeholder="%" autocomplete="off" />%
+          </label>
+          <label>Fable used
+            <input id="setup-fable" type="number" min="1" max="100" step="1" placeholder="%" autocomplete="off" />%
+          </label>
+        </div>
+
+        <p class="setup-error" id="setup-error" hidden></p>
+
+        <div class="setup-actions">
+          <button type="button" id="setup-go">Calibrate</button>
+          <!-- Revealed only after a solve genuinely fails, so a bad week of data
+               can't lock someone out of their own dashboard. -->
+          <button type="button" class="link" id="setup-skip" hidden>Continue without calibrating</button>
+        </div>
+      </div>
+    </div>
+
     <script src="/app.js" type="module"></script>
   </body>
 </html>

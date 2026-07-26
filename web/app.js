@@ -12,7 +12,15 @@ const cells = new Map() // date -> { el, avail, spent, name, amt, label }
 // Everything is expressed as a share of the WEEKLY ALLOWANCE. The underlying
 // unit is a weighted token cost, but on a subscription there is no dollar
 // meter — showing API prices would be a number that means nothing here.
-const capacityUnits = () => state?.capacity?.weeklyUsd ?? null
+//
+// An INFERRED limit ("heaviest week you've run + 15%") is good enough to pace
+// against — allocation only needs the week's relative shape — but it is not a
+// number you can report as "72% of your limit". So every percentage-of-limit
+// readout resolves through here and reads '—' until a real /usage figure has
+// been entered. The calendar still renders shape, spend and weights.
+const isEstimated = (c) => !!c?.estimated
+const capacityUnits = () =>
+  isEstimated(state?.capacity) ? null : (state?.capacity?.weeklyUsd ?? null)
 
 const pct = (n) => {
   const cap = capacityUnits()
@@ -55,6 +63,7 @@ async function patchPlan(patch) {
   const next = await res.json()
   // Ignore responses that a newer in-flight save has already superseded.
   if (seq === postSeq) apply(next)
+  return next
 }
 
 function apply(next) {
@@ -64,7 +73,7 @@ function apply(next) {
   // Each section paints independently. A single bad element reference used to
   // throw inside paintSummary and take the whole calendar down with it, since
   // the week renders after it.
-  for (const step of [paintPools, paintSummary, syncWeekDom, paintWeek]) {
+  for (const step of [paintPools, paintSummary, syncWeekDom, paintWeek, syncSetup]) {
     try {
       step()
     } catch (err) {
@@ -79,7 +88,7 @@ function paintPools() {
   host.textContent = ''
   for (const [id, meta] of Object.entries(all.poolMeta)) {
     const s = all.pools[id]
-    const cap = s.capacity.weeklyUsd
+    const cap = isEstimated(s.capacity) ? null : s.capacity.weeklyUsd
     const used = cap ? (s.week.spent / cap) * 100 : null
 
     const btn = document.createElement('button')
@@ -122,8 +131,10 @@ function paintPools() {
   }
 }
 
+const NEEDS_CAL = 'Enter your /usage % below to turn history into real percentages.'
+
 function verdictFor(pct) {
-  if (pct == null) return ['Not enough history to pace yet.', '']
+  if (pct == null) return [isEstimated(state.capacity) ? NEEDS_CAL : 'Not enough history to pace yet.', '']
   if (pct >= 99) return ["Today's allocation is exhausted.", 'bad']
   const p = Math.round(pct * 100)
   if (pct < 0.6) return [`${p}% of today's share used — comfortable.`, 'good']
@@ -145,8 +156,10 @@ function paintWeekGauge() {
     hour: 'numeric',
     minute: '2-digit',
   })
+  // The reset moment is a fact about the window, not about the limit — keep it
+  // visible even when the percentage can't be shown.
   $('week-sub').textContent =
-    used == null ? '' : `of weekly allowance · resets ${resetLabel}`
+    used == null ? `resets ${resetLabel}` : `of weekly allowance · resets ${resetLabel}`
 
   const meter = $('week-meter')
   meter.style.width = `${Math.min(100, (used ?? 0) * 100)}%`
@@ -174,7 +187,7 @@ function paintWeekGauge() {
 
   const el = $('week-verdict')
   if (used == null || ratio == null) {
-    el.textContent = 'Not enough history to pace yet.'
+    el.textContent = isEstimated(state.capacity) ? NEEDS_CAL : 'Not enough history to pace yet.'
     el.className = 'verdict'
     return
   }
@@ -183,18 +196,22 @@ function paintWeekGauge() {
   const dayWord = dl === 1 ? 'day' : 'days'
   // Language is deliberately consistent with the Running balance stat:
   // burning faster than planned is always "over plan", never "ahead".
-  const off = Math.round(Math.abs(ratio - 1) * 100)
+  // Colour still keys off the RATIO (being 2% over on day one matters more than
+  // on day six), but the printed figure is points of the weekly limit — the same
+  // basis as the Running balance stat. Printing a relative overshoot here and an
+  // absolute one there is why the two lines never matched.
+  const off = pct(Math.abs(state.balance ?? 0))
   if (ratio <= 1.02) {
     el.textContent =
       ratio < 0.9
-        ? `${off}% under plan — ${left.toFixed(0)}% left for the final ${dl} ${dayWord}.`
+        ? `${off} under plan — ${left.toFixed(0)}% left for the final ${dl} ${dayWord}.`
         : `On plan — ${left.toFixed(0)}% left for the final ${dl} ${dayWord}.`
     el.className = 'verdict good'
   } else if (ratio <= 1.25) {
-    el.textContent = `${off}% over plan — ${left.toFixed(0)}% left for ${dl} ${dayWord}.`
+    el.textContent = `${off} over plan — ${left.toFixed(0)}% left for ${dl} ${dayWord}.`
     el.className = 'verdict warn'
   } else {
-    el.textContent = `${off}% over plan — only ${left.toFixed(0)}% left for ${dl} ${dayWord}.`
+    el.textContent = `${off} over plan — only ${left.toFixed(0)}% left for ${dl} ${dayWord}.`
     el.className = 'verdict bad'
   }
 }
@@ -203,7 +220,9 @@ function paintWeekGauge() {
 function paintCalField(id, s) {
   const el = $(id)
   if (document.activeElement === el) return
-  const cap = s?.capacity?.weeklyUsd
+  // Pre-fill only a number that means something. Seeding the box with a reading
+  // derived from a guessed limit invites confirming the guess back to itself.
+  const cap = isEstimated(s?.capacity) ? null : s?.capacity?.weeklyUsd
   el.value = cap ? String(Math.round((s.week.spent / cap) * 100)) : ''
   el.classList.toggle('calibrated', ['manual', 'calibrated-share'].includes(s?.capacity?.source))
 }
@@ -212,7 +231,7 @@ function paintBlockCalField() {
   const el = $('cal-block')
   if (document.activeElement === el) return
   const b = all.pools.all.block
-  el.value = b?.open && b.pct != null ? String(Math.round(b.pct * 100)) : ''
+  el.value = b?.open && b.pct != null && !b.estimated ? String(Math.round(b.pct * 100)) : ''
   el.classList.toggle('calibrated', b?.source === 'manual')
 }
 
@@ -225,7 +244,9 @@ function paintSummary() {
 
   // Headline is "how much of today's share is gone", which is the number that
   // actually decides whether to keep working.
-  const used = state.today.pct
+  // Today's share is a slice of the weekly limit, so an uncalibrated limit makes
+  // this percentage just as invented as the weekly one.
+  const used = isEstimated(state.capacity) ? null : state.today.pct
   $('today-spent').textContent = used == null ? '—' : `${Math.min(999, Math.round(used * 100))}%`
   $('today-allow').textContent =
     state.today.allowance == null ? '' : `of today's share (${pct(state.today.allowance)} of week)`
@@ -242,15 +263,17 @@ function paintSummary() {
   paintWeekGauge()
 
   // Debt / reserve — the two halves of the hybrid policy, stated explicitly.
+  // Same number as the weekly gauge's verdict, in the same units (points of the
+  // weekly limit) — they are two renderings of `balance`, so they cannot drift.
   const debtEl = $('debt')
-  if (state.debt == null) {
+  if (state.balance == null || capacityUnits() == null) {
     debtEl.textContent = '—'
     debtEl.className = ''
-  } else if (state.debt > 0) {
-    debtEl.textContent = `${pct(state.debt)} over plan`
+  } else if (state.balance > 0) {
+    debtEl.textContent = `${pct(state.balance)} over plan`
     debtEl.className = 'bad'
   } else {
-    debtEl.textContent = `${pct(-state.debt)} under plan`
+    debtEl.textContent = `${pct(-state.balance)} under plan`
     debtEl.className = 'good'
   }
 
@@ -265,7 +288,7 @@ function paintSummary() {
     $('block-spent').textContent = 'none open'
     $('block-spent').className = ''
   } else {
-    const bp = blk.pct == null ? null : blk.pct * 100
+    const bp = blk.pct == null || blk.estimated ? null : blk.pct * 100
     const ends = new Date(blk.endsAt)
     const mins = Math.max(0, Math.round((ends - new Date()) / 60000))
     const rem = mins >= 60 ? `${Math.floor(mins / 60)}h${String(mins % 60).padStart(2, '0')}m` : `${mins}m`
@@ -291,7 +314,7 @@ function paintSummary() {
           : src === 'derived'
           ? `${Math.round((state.overall?.share ?? 0.5) * 100)}% of the overall limit`
           : src === 'history'
-            ? 'heaviest rolling 7 days + 15%'
+            ? 'not calibrated — estimated from history'
             : 'unknown — no history yet'
 
   // On the Fable meter, the week total is the other thing that can stop you.
@@ -495,6 +518,80 @@ function attachDrag(track, date) {
   })
 }
 
+/**
+ * Blocking setup gate.
+ *
+ * An uncalibrated dashboard has no percentages on it — the tool can see what you
+ * spent but not what you're allowed, so it can only show dashes. Surfacing that
+ * and trusting people to find the settings row is how you get a tool everyone
+ * believes is broken, so the numbers are collected before anything else renders.
+ *
+ * `setupDismissed` is deliberately session-only and not persisted: the escape
+ * hatch exists so a genuinely unsolvable week can't lock you out, not to become
+ * a permanent way to run the tool blind.
+ */
+let setupDismissed = false
+
+function syncSetup() {
+  const needed = isEstimated(all.pools.all.capacity) && !setupDismissed
+  $('setup').hidden = !needed
+  if (!needed) return
+  // Seed from the saved plan so the dialog agrees with the settings row.
+  const ws = all.plan.weekStart
+  const p2 = (n) => String(n).padStart(2, '0')
+  if (document.activeElement !== $('setup-dow')) $('setup-dow').value = String(ws.dow)
+  if (document.activeElement !== $('setup-time')) {
+    $('setup-time').value = `${p2(ws.hour)}:${p2(ws.minute || 0)}`
+  }
+}
+
+function wireSetup() {
+  const err = $('setup-error')
+  const fail = (msg, allowSkip) => {
+    err.textContent = msg
+    err.hidden = false
+    if (allowSkip) $('setup-skip').hidden = false
+  }
+
+  $('setup-skip').addEventListener('click', () => {
+    setupDismissed = true
+    $('setup').hidden = true
+  })
+
+  $('setup-go').addEventListener('click', async () => {
+    const week = Number($('setup-week').value)
+    const fable = Number($('setup-fable').value)
+    // Both or nothing — one reading leaves two unknowns and one equation.
+    if (!(week > 0 && week <= 100) || !(fable > 0 && fable <= 100)) {
+      return fail('Enter both percentages, each between 1 and 100.', false)
+    }
+
+    const btn = $('setup-go')
+    btn.disabled = true
+    err.hidden = true
+    try {
+      const [h, m] = ($('setup-time').value || '00:00').split(':').map(Number)
+      // Window first: the percentages describe that window, so solving before
+      // it is set would solve against the wrong span of history.
+      await patchPlan({
+        weekStart: { dow: Number($('setup-dow').value), hour: h || 0, minute: m || 0 },
+      })
+      await patchPlan({ calibratePct: week, calibratePool: 'all' })
+      const res = await patchPlan({ calibratePct: fable, calibratePool: 'fable' })
+
+      if (res.calibrationNote) return fail(res.calibrationNote, true)
+      if (isEstimated(res.pools.all.capacity)) {
+        return fail('Those readings could not be solved — check them against /usage.', true)
+      }
+      $('setup').hidden = true
+    } catch (e) {
+      fail(`Could not save: ${e.message}`, true)
+    } finally {
+      btn.disabled = false
+    }
+  })
+}
+
 $('refresh').addEventListener('click', () => load(true))
 
 /**
@@ -545,5 +642,8 @@ function wireSettings() {
   })
 }
 
-load().then(wireSettings)
+load().then(() => {
+  wireSettings()
+  wireSetup()
+})
 setInterval(() => { if (!dragging) load() }, 60_000)

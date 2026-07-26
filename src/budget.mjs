@@ -1,6 +1,6 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
-import { DATA_DIR } from './scan.mjs'
+import { DATA_DIR, writeAtomic } from './scan.mjs'
 
 const PLAN_FILE = path.join(DATA_DIR, 'plan.json')
 
@@ -28,7 +28,10 @@ export const DEFAULT_PLAN = {
   fableWeight: 1,
   // Last observed /usage percentages, kept so entering one reading can be
   // combined with the other to solve for both unknowns at once.
-  observed: { weekPct: null, fablePct: null },
+  // `weekOf` stamps which weekly window the readings describe, so a stale
+  // reading from a previous week is discarded rather than solved against this
+  // week's usage.
+  observed: { weekPct: null, fablePct: null, weekOf: null },
   // A known 5-hour-block reset moment (ISO). Reconstructing the block chain
   // from transcript history alone drifts — gaps and hour bucketing move the
   // anchor by hours. One observed reset time pins it exactly; the chain then
@@ -104,10 +107,22 @@ export function solveFromObservations({ weekPct, fablePct, fableShare, fableUnit
 }
 
 export async function loadPlan() {
+  let raw
   try {
-    return migrate(JSON.parse(await fsp.readFile(PLAN_FILE, 'utf8')))
-  } catch {
-    return { ...DEFAULT_PLAN }
+    raw = await fsp.readFile(PLAN_FILE, 'utf8')
+  } catch (err) {
+    // Only "there is no plan yet" may fall back to defaults.
+    if (err.code === 'ENOENT') return structuredClone(DEFAULT_PLAN)
+    throw err
+  }
+  try {
+    return migrate(JSON.parse(raw))
+  } catch (err) {
+    // A file that EXISTS but won't parse must never degrade to DEFAULT_PLAN:
+    // the caller merges a patch onto whatever it gets back and writes it, so a
+    // single unreadable read silently rewrites the user's whole plan with
+    // defaults. Failing loudly keeps the bad read from becoming a bad write.
+    throw new Error(`plan.json is unreadable (${err.message}); refusing to overwrite it`)
   }
 }
 
@@ -120,9 +135,10 @@ export async function savePlan(plan) {
   // A solve from inconsistent readings could otherwise store an absurd weight
   // and skew every meter; keep it inside a defensible range.
   merged.fableWeight = Math.max(0.05, Math.min(50, Number(merged.fableWeight) || 1))
-  await fsp.writeFile(PLAN_FILE, JSON.stringify(merged, null, 2))
+  await writeAtomic(PLAN_FILE, JSON.stringify(merged, null, 2))
   return merged
 }
+
 
 const HOUR = 3600e3
 const DAY = 24 * HOUR
@@ -204,7 +220,9 @@ export function inferCapacity(buckets, weekStart, now, limitEvents = [], pool, f
     pins.push(costBetween(buckets, start, at, pool, fw))
   }
   if (pins.length) {
-    return { weeklyUsd: Math.max(...pins), source: 'limit-event', pins: pins.length }
+    // A real limit hit is ground truth, not an estimate — percentages built on
+    // it are honest even though nobody typed anything in.
+    return { weeklyUsd: Math.max(...pins), source: 'limit-event', pins: pins.length, estimated: false }
   }
 
   const keys = Object.keys(buckets)
@@ -226,7 +244,10 @@ export function inferCapacity(buckets, weekStart, now, limitEvents = [], pool, f
   }
   if (best <= 0) return { weeklyUsd: null, source: 'unknown' }
   // The heaviest 7 days you ran without being cut off is a floor, not a ceiling.
-  return { weeklyUsd: best * 1.15, source: 'history' }
+  // `estimated` marks it as a guess: it still paces allocation (which only needs
+  // the relative shape of the week), but the UI must not render it as a real
+  // "% of your limit" — that number would be fiction stated to the pixel.
+  return { weeklyUsd: best * 1.15, source: 'history', estimated: true }
 }
 
 export function weightFor(plan, date) {
@@ -325,7 +346,7 @@ export function computeState({ buckets, limitEvents, plan, pool = 'all', now = n
   // or calibrating the overall limit leaves the other readouts disagreeing.
   const allCapacity =
     allCfg.mode === 'manual' && allCfg.weeklyUsd
-      ? { weeklyUsd: allCfg.weeklyUsd, source: 'manual' }
+      ? { weeklyUsd: allCfg.weeklyUsd, source: 'manual', estimated: false }
       : inferredAll
 
   const cap = plan.capacity[pool] || { mode: 'auto', weeklyUsd: null }
@@ -334,14 +355,25 @@ export function computeState({ buckets, limitEvents, plan, pool = 'all', now = n
     // A sub-limit is stored as a FRACTION of the overall limit, not an
     // absolute. That way recalibrating the weekly limit rescales it instead of
     // leaving the two meters describing different-sized weeks.
+    // A sub-limit is only as real as the overall limit it is a share of, so it
+    // inherits `estimated` rather than looking calibrated on its own.
     capacity = allCapacity.weeklyUsd
-      ? { weeklyUsd: allCapacity.weeklyUsd * cap.share, source: 'calibrated-share', share: cap.share }
+      ? {
+          weeklyUsd: allCapacity.weeklyUsd * cap.share,
+          source: 'calibrated-share',
+          share: cap.share,
+          estimated: !!allCapacity.estimated,
+        }
       : { weeklyUsd: null, source: 'unknown' }
   } else if (cap.mode === 'manual' && cap.weeklyUsd) {
-    capacity = { weeklyUsd: cap.weeklyUsd, source: 'manual' }
+    capacity = { weeklyUsd: cap.weeklyUsd, source: 'manual', estimated: false }
   } else if (pool === 'fable') {
     capacity = allCapacity.weeklyUsd
-      ? { weeklyUsd: allCapacity.weeklyUsd * (plan.fableShare ?? 0.5), source: 'derived' }
+      ? {
+          weeklyUsd: allCapacity.weeklyUsd * (plan.fableShare ?? 0.5),
+          source: 'derived',
+          estimated: !!allCapacity.estimated,
+        }
       : { weeklyUsd: null, source: 'unknown' }
   } else {
     capacity = allCapacity
@@ -426,6 +458,13 @@ export function computeState({ buckets, limitEvents, plan, pool = 'all', now = n
     },
     capacity,
     remaining,
+    // `debt` is the ALLOCATOR's quantity: it stops at yesterday's close, because
+    // folding today's spend into it would re-price today's own allowance while
+    // you spend it. That makes it the wrong thing to show next to the weekly
+    // gauge, which is drawn through *now* — the two disagreed on screen for that
+    // reason alone. `balance` is the gauge's own number: actual minus where the
+    // plan says you should be at this moment. Both readouts now derive from it.
+    balance: expected == null ? null : spentWeek - expected,
     debt: alloc ? alloc.debt : null,
     reserve: alloc ? alloc.reserve : null,
     throttled: alloc ? alloc.throttled : false,
@@ -440,13 +479,14 @@ export function computeState({ buckets, limitEvents, plan, pool = 'all', now = n
     block: (() => {
       const blk = currentBlock(buckets, now, pool, plan.blockAnchor, fw)
       const bc = plan.capacity.block || { mode: 'auto', weeklyUsd: null }
-      const cap =
-        bc.mode === 'manual' && bc.weeklyUsd ? bc.weeklyUsd : inferBlockCapacity(buckets, now, fw)
+      const manual = bc.mode === 'manual' && bc.weeklyUsd
+      const cap = manual ? bc.weeklyUsd : inferBlockCapacity(buckets, now, fw)
       return {
         ...blk,
         capacity: cap,
         pct: cap ? blk.spent / cap : null,
-        source: bc.mode === 'manual' && bc.weeklyUsd ? 'manual' : 'history',
+        source: manual ? 'manual' : 'history',
+        estimated: !manual,
       }
     })(),
     perDay,

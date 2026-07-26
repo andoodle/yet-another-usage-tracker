@@ -28,6 +28,9 @@ Code does; only `scripts/` is mac-specific.
 - [x] calibration — enter the % `/usage` shows, tool solves for the real limit
 - [x] 5-hour block — start inferred from transcript activity
 - [x] launchagent — always-on install script
+- [x] durable plan — atomic writes + serialized saves; settings survive concurrency
+- [x] cross-file dedup — warm and cold scans agree (was inflating toward 2x)
+- [x] setup gate — blocking dialog collects the reset window + both `/usage` readings first
 - [ ] Full Disk Access — grant it to `node` so the LaunchAgent can read ~/Desktop
 - [ ] limit pinning — auto-pins on first real rate-limit hit; unverified until one occurs
 
@@ -123,6 +126,14 @@ week and Fable percentages together; either one alone can't determine either unk
    sustained, plus 15%. Rolling, not calendar-aligned — a calendar-week max
    ignores the in-progress week, which lets a heavy current week exceed its own
    inferred limit and pin remaining budget to zero.
+   This number paces allocation, but it is **not shown as a percentage**: every
+   "% of limit" readout stays `—` until a real reading is entered. Pacing only
+   needs the week's relative shape; reporting "72% of your limit" off a guess
+   would be fiction stated to the pixel. Because that leaves nothing on screen,
+   an uncalibrated dashboard opens behind a **blocking setup dialog** that asks
+   for the reset window and both percentages before anything renders. It has no
+   dismiss button until a solve actually fails, so an unsolvable week can't lock
+   you out.
 2. **Calibrated**: run `/usage`, type the weekly percentage into the field. The
    tool solves `limit = spentThisWeek ÷ pct`. One number, in units you can see.
 3. **Pinned**: when you hit a real limit, Claude Code writes an error into the
@@ -156,7 +167,7 @@ and `reserveReleaseDays` in `~/.claude/budget-data/plan.json`.
 
 | Path | Role |
 |---|---|
-| `src/scan.mjs` | Incremental transcript reader. Caches per-file byte offsets + hourly aggregates in `~/.claude/budget-data/scan-cache.json`. Cold scan of 249MB ≈ 1.6s; incremental ≈ 40ms. |
+| `src/scan.mjs` | Incremental transcript reader. Caches per-file byte offsets + per-message records in `~/.claude/budget-data/scan-cache.json`, de-duplicated across files at merge time. Cold scan of 249MB ≈ 1.4s; incremental ≈ 40ms. |
 | `src/pricing.mjs` | Per-model tiers and the cache multipliers that set relative weight. |
 | `src/budget.mjs` | Week windowing, limit inference, buffer+debt allocation, block detection. |
 | `src/server.mjs` | `GET /api/state`, `POST /api/plan`, static files. |
@@ -166,8 +177,11 @@ Plan and cache live in `~/.claude/budget-data/` — deleting either is safe.
 
 ## Known limits
 
-- Messages are deduped by id within a file; the same message appearing in two
-  different transcripts (rare) is counted twice.
+- Messages appearing in several transcripts (a resumed or forked session copies
+  its parent's history — ~50% of usage-bearing messages here) are counted once,
+  de-duplicated at merge time over a sorted file walk, so warm and cold scans
+  agree. A message with no id can't be identified across files and is always
+  counted.
 - Cache-write TTL is assumed 5m unless the transcript carries the newer
   `usage.cache_creation` breakdown, so 1h-TTL writes are under-weighted.
 - The weekly reset day/hour is a guess until you set it to match `/usage`.
