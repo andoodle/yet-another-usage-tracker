@@ -559,11 +559,17 @@ function wireSetup() {
   })
 
   $('setup-go').addEventListener('click', async () => {
-    const week = Number($('setup-week').value)
-    const fable = Number($('setup-fable').value)
+    const weekRaw = $('setup-week').value.trim()
+    const fableRaw = $('setup-fable').value.trim()
+    const week = Number(weekRaw)
+    const fable = Number(fableRaw)
     // Both or nothing — one reading leaves two unknowns and one equation.
-    if (!(week > 0 && week <= 100) || !(fable > 0 && fable <= 100)) {
-      return fail('Enter both percentages, each between 1 and 100.', false)
+    // "Both" means both FILLED IN, not both nonzero: Fable reads 0% for anyone
+    // who doesn't use it, and rejecting that made calibration impossible for
+    // them. Blank is the only invalid entry.
+    const valid = (raw, n) => raw !== '' && Number.isFinite(n) && n >= 0 && n <= 100
+    if (!valid(weekRaw, week) || !valid(fableRaw, fable)) {
+      return fail('Enter both percentages, each between 0 and 100.', false)
     }
 
     const btn = $('setup-go')
@@ -579,11 +585,19 @@ function wireSetup() {
       await patchPlan({ calibratePct: week, calibratePool: 'all' })
       const res = await patchPlan({ calibratePct: fable, calibratePool: 'fable' })
 
-      if (res.calibrationNote) return fail(res.calibrationNote, true)
-      if (isEstimated(res.pools.all.capacity)) {
-        return fail('Those readings could not be solved — check them against /usage.', true)
+      // Whether it solved is the pass/fail test, NOT whether a note came back.
+      // A successful solve can carry an advisory note (Fable at 0% calibrates
+      // the weekly limit fine, it just can't measure the Fable weight), and
+      // treating that note as an error kept the dialog up on a good result.
+      if (!isEstimated(res.pools.all.capacity)) {
+        if (res.calibrationNote) console.info('[claude-budget]', res.calibrationNote)
+        $('setup').hidden = true
+        return
       }
-      $('setup').hidden = true
+      return fail(
+        res.calibrationNote || 'Those readings could not be solved — check them against /usage.',
+        true,
+      )
     } catch (e) {
       fail(`Could not save: ${e.message}`, true)
     } finally {
@@ -618,8 +632,15 @@ function wireSettings() {
     ['cal-block', 'block'],
   ]) {
     $(id).addEventListener('change', (e) => {
-      if (e.target.value === '') return
-      patchPlan({ calibratePct: Number(e.target.value), calibratePool: target })
+      // Blank is how you clear a calibration. 0 is a reading — Fable reads 0%
+      // all week for anyone who doesn't use it, and every meter reads 0 right
+      // after a reset — so it must reach the server as a number, not as a
+      // request to wipe the calibration.
+      const raw = e.target.value.trim()
+      if (raw === '') return patchPlan({ calibrateClear: true, calibratePool: target })
+      const n = Number(raw)
+      if (!Number.isFinite(n) || n < 0 || n > 100) return
+      patchPlan({ calibratePct: n, calibratePool: target })
     })
   }
   $('reserve-pct').addEventListener('input', (e) => {

@@ -98,8 +98,8 @@
         <p class="sub cal-intro">
           Run <code>/usage</code> and type each percentage it reports. Week and Fable are
           solved <b>together</b> — entering one alone can't determine either, so the tool
-          waits for the second. The 5-hour block is independent. Enter <b>0</b> to clear
-          and go back to inferring.
+          waits for the second. The 5-hour block is independent. <b>0% is a real reading</b>
+          (Fable sits at 0 if you don't use it); <b>clear a field</b> to go back to inferring.
         </p>
         <label>
           Week
@@ -161,10 +161,10 @@
 
         <div class="setup-row">
           <label>Week used
-            <input id="setup-week" type="number" min="1" max="100" step="1" placeholder="%" autocomplete="off" />%
+            <input id="setup-week" type="number" min="0" max="100" step="1" placeholder="%" autocomplete="off" />%
           </label>
           <label>Fable used
-            <input id="setup-fable" type="number" min="1" max="100" step="1" placeholder="%" autocomplete="off" />%
+            <input id="setup-fable" type="number" min="0" max="100" step="1" placeholder="%" autocomplete="off" />%
           </label>
         </div>
 

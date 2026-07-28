@@ -85,12 +85,41 @@ function migrate(p) {
  * Subtracting gives `other = (weekPct − fablePct × fableShare) × W`, and
  * `other` is measured directly and unaffected by k — so W falls out, then k.
  *
- * @returns {{weeklyUsd:number, fableWeight:number}|{error:string}}
+ * **Zero is a real reading, not a rejection.** `fablePct` of 0 is the normal
+ * state for anyone who doesn't use Fable, and `weekPct` of 0 is what a freshly
+ * reset week shows. Both are honest observations; they just carry less
+ * information than a nonzero one, so the branches below solve what they can and
+ * leave the rest untouched rather than erroring or silently resetting.
+ *
+ * `currentFableWeight` is returned unchanged whenever the readings can't
+ * determine `k` — a solve that learns nothing about the weight must not clobber
+ * a weight an earlier solve did determine.
+ *
+ * @returns {{weeklyUsd:number, fableWeight:number, note?:string}|{error:string}}
  */
-export function solveFromObservations({ weekPct, fablePct, fableShare, fableUnits, otherUnits }) {
+export function solveFromObservations({
+  weekPct,
+  fablePct,
+  fableShare,
+  fableUnits,
+  otherUnits,
+  currentFableWeight = 1,
+}) {
   const w = weekPct / 100
   const f = fablePct / 100
   const denom = w - f * fableShare
+
+  // A week reading of 0% is valid and simply unsolvable: W would come out of
+  // `otherUnits / 0`. Say so plainly instead of failing the reading — the fix
+  // is to come back later in the week, not to enter a different number.
+  if (weekPct === 0) {
+    return {
+      error:
+        otherUnits > 0 || fableUnits > 0
+          ? 'week reads 0% but usage was recorded — likely rounding; recalibrate once it shows 1% or more'
+          : 'week reads 0% with no usage yet — nothing to solve against; recalibrate once you have used some of the week',
+    }
+  }
 
   if (!(otherUnits > 0)) return { error: 'no non-Fable usage recorded this week yet' }
   if (denom <= 0) {
@@ -99,7 +128,24 @@ export function solveFromObservations({ weekPct, fablePct, fableShare, fableUnit
     return { error: 'readings imply Fable is 100% of the week; check the numbers' }
   }
   const weeklyUsd = otherUnits / denom
-  if (!(fableUnits > 0)) return { weeklyUsd, fableWeight: 1 }
+
+  // Fable at 0%: the weekly limit still solves (Fable contributes nothing to
+  // the equation), but the weight doesn't — 0 = fableUnits × k only has the
+  // degenerate solution k = 0, which would zero out the Fable meter entirely.
+  const noFableInfo = 'No Fable usage recorded this week, so the Fable weight could not be measured — weekly limit calibrated.'
+
+  if (fablePct === 0) {
+    return {
+      weeklyUsd,
+      fableWeight: currentFableWeight,
+      note:
+        fableUnits > 0
+          ? 'Fable reads 0% despite some Fable usage — weekly limit calibrated, Fable weight left as-is (too little usage to measure it).'
+          : noFableInfo,
+    }
+  }
+
+  if (!(fableUnits > 0)) return { weeklyUsd, fableWeight: currentFableWeight, note: noFableInfo }
 
   const fableWeight = (f * fableShare * weeklyUsd) / fableUnits
   if (!Number.isFinite(fableWeight) || fableWeight <= 0) return { error: 'could not solve Fable weight' }
