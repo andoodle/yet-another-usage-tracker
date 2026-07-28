@@ -113,6 +113,11 @@
           5h block
           <input id="cal-block" type="number" min="0" max="100" step="1" placeholder="%" autocomplete="off" />%
         </label>
+        <!-- What the last calibration actually did. Solving can succeed and
+             still have something worth saying (a 0% Fable reading calibrates
+             the weekly limit but can't measure the Fable weight), so this is
+             not an error slot — the level decides how it reads. -->
+        <p class="cal-note" id="cal-note" hidden><span id="cal-note-text"></span></p>
       </section>
 
       <p class="footnote" id="footnote">

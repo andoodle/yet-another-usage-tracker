@@ -68,6 +68,15 @@ async function readBody(req) {
 }
 
 /**
+ * Calibration feedback carries its severity rather than leaving the client to
+ * infer it. "Fable weight couldn't be measured" and "those readings don't solve"
+ * are different outcomes — the first happened alongside a successful calibration
+ * — and a bare string made the dialog treat every note as a failure.
+ */
+const info = (text) => ({ level: 'info', text })
+const warn = (text) => ({ level: 'warn', text })
+
+/**
  * Apply one plan patch and persist it. MUST run under `withPlanLock` — it reads
  * the plan, derives from it, and writes it back.
  */
@@ -88,6 +97,12 @@ async function applyPlanPatch(body) {
     delete next.calibratePool
     const target = body.calibratePool || 'all'
     next.capacity = { ...next.capacity }
+
+    calibrationNote = info(
+      target === 'block'
+        ? 'Block calibration cleared — back to inferring.'
+        : 'Week and Fable calibration cleared — back to inferring from history.',
+    )
 
     if (target === 'block') {
       next.capacity.block = { mode: 'auto', weeklyUsd: null }
@@ -111,7 +126,7 @@ async function applyPlanPatch(body) {
     const target = body.calibratePool || 'all'
     const p = Number(body.calibratePct)
     if (!Number.isFinite(p) || p < 0 || p > 100) {
-      return { plan: next, calibrationNote: 'Percentages must be between 0 and 100.' }
+      return { plan: next, calibrationNote: warn('Percentages must be between 0 and 100.') }
     }
     const { buckets: b2, limitEvents: l2 } = await getScan()
     // The block meter calibrates against the CURRENT 5h block, not the week.
@@ -127,14 +142,16 @@ async function applyPlanPatch(body) {
       if (p === 0) {
         // Valid but unsolvable: the limit would be observed / 0. A block that
         // reads 0% has just rolled over, so there is nothing to divide by yet.
-        calibrationNote =
+        calibrationNote = warn(
           observed > 0
             ? 'Block reads 0% but usage was recorded in it — likely rounding; recalibrate once it shows 1% or more.'
-            : 'Block reads 0% with no usage in it yet — nothing to solve against.'
+            : 'Block reads 0% with no usage in it yet — nothing to solve against.',
+        )
       } else if (observed > 0) {
         next.capacity.block = { mode: 'manual', weeklyUsd: observed / (p / 100) }
+        calibrationNote = info('5-hour block limit calibrated.')
       } else {
-        calibrationNote = 'No usage recorded in the current block yet, so its limit could not be solved.'
+        calibrationNote = warn('No usage recorded in the current block yet, so its limit could not be solved.')
       }
     } else {
       // Week and Fable share two unknowns (weekly limit + Fable weight), so
@@ -171,25 +188,27 @@ async function applyPlanPatch(body) {
           currentFableWeight: next.fableWeight ?? 1,
         })
         if (sol.error) {
-          calibrationNote = sol.error
+          calibrationNote = warn(sol.error)
         } else {
           next.fableWeight = sol.fableWeight
           next.capacity.all = { mode: 'manual', weeklyUsd: sol.weeklyUsd }
           next.capacity.fable = { mode: 'auto', weeklyUsd: null } // derived from share
-          if (sol.note) calibrationNote = sol.note
+          calibrationNote = info(sol.note || 'Calibrated from both readings.')
         }
       } else if (weekPct != null) {
         // Only the week is known — solve the limit at the current weight.
         // A 0% week has nothing to divide by; keep the reading, skip the solve.
         if (weekPct === 0) {
-          calibrationNote = 'Week reads 0% — nothing to solve against yet. Enter the Fable % too, or recalibrate later in the week.'
+          calibrationNote = warn(
+            'Week reads 0% — nothing to solve against yet. Enter the Fable % too, or recalibrate later in the week.',
+          )
         } else {
           const total = fableUnits * (next.fableWeight ?? 1) + otherUnits
           next.capacity.all = { mode: 'manual', weeklyUsd: total / (weekPct / 100) }
-          calibrationNote = 'Enter the Fable % too — both are needed to solve the Fable weight.'
+          calibrationNote = info('Weekly limit calibrated. Enter the Fable % too — both are needed to solve the Fable weight.')
         }
       } else {
-        calibrationNote = 'Enter the week % too — both are needed to solve the Fable weight.'
+        calibrationNote = warn('Enter the week % too — both are needed to solve the Fable weight.')
       }
     }
   }

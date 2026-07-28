@@ -102,6 +102,27 @@ input[type="range"] { accent-color: var(--accent); width: 120px; }
 /* A calibrated meter is pinned to something you observed, not inferred. */
 .calibrate input.calibrated { border-color: var(--accent); color: var(--accent); }
 
+/* Outcome of the last calibration, on its own row under the fields.
+   `flex: 0 0 100%` with NO max-width is what actually forces the line break —
+   max-width is applied to the hypothetical main size, so it participates in
+   flex line-breaking and a capped item happily shares the row with the inputs.
+   The readable measure is therefore constrained on the inner span instead. */
+.cal-note {
+  flex: 0 0 100%;
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  border-left: 2px solid currentColor;
+  padding-left: 8px;
+}
+.cal-note span { display: inline-block; max-width: 60ch; vertical-align: top; }
+.cal-note[hidden] { display: none; }
+/* info = it worked, here's a caveat. warn = it didn't solve. */
+.cal-note.info { color: var(--muted); }
+.cal-note.info::before { content: '✓ '; color: var(--accent); }
+.cal-note.warn { color: var(--warn); }
+.cal-note.warn::before { content: '! '; }
+
 .meter {
   position: relative;
   height: 8px;

@@ -53,6 +53,13 @@ async function load(fresh = false) {
 }
 
 let postSeq = 0
+/**
+ * Outcome of the most recent calibration, shown under the calibration fields.
+ * Held here rather than painted directly so it survives the re-renders that a
+ * refresh or a poll triggers.
+ */
+let calNote = null
+
 async function patchPlan(patch) {
   const seq = ++postSeq
   const res = await fetch('/api/plan', {
@@ -61,6 +68,10 @@ async function patchPlan(patch) {
     body: JSON.stringify(patch),
   })
   const next = await res.json()
+  // Only a calibration patch may change the note — including clearing it on a
+  // clean solve. Otherwise dragging the availability calendar, which posts every
+  // 120ms, would wipe the message before it could be read.
+  if ('calibratePct' in patch || 'calibrateClear' in patch) calNote = next.calibrationNote ?? null
   // Ignore responses that a newer in-flight save has already superseded.
   if (seq === postSeq) apply(next)
   return next
@@ -235,6 +246,25 @@ function paintBlockCalField() {
   el.classList.toggle('calibrated', b?.source === 'manual')
 }
 
+/**
+ * Say what the last calibration did. A solve can succeed and still be worth
+ * explaining — a 0% Fable reading calibrates the weekly limit but leaves the
+ * Fable weight unmeasured — so `level` decides whether this reads as a
+ * confirmation or a problem, rather than everything looking like an error.
+ */
+function paintCalNote() {
+  const el = $('cal-note')
+  const txt = $('cal-note-text')
+  if (!calNote || !calNote.text) {
+    el.hidden = true
+    txt.textContent = ''
+    return
+  }
+  txt.textContent = calNote.text
+  el.className = `cal-note ${calNote.level === 'warn' ? 'warn' : 'info'}`
+  el.hidden = false
+}
+
 function paintSummary() {
   const wStart = new Date(state.week.start)
   const wEnd = new Date(state.week.end)
@@ -333,6 +363,7 @@ function paintSummary() {
   paintCalField('cal-all', all.pools.all)
   paintCalField('cal-fable', all.pools.fable)
   paintBlockCalField()
+  paintCalNote()
 
   const rf = Math.round((state.plan.reserveFraction ?? 0) * 100)
   if (document.activeElement !== $('reserve-pct')) $('reserve-pct').value = String(rf)
@@ -589,13 +620,14 @@ function wireSetup() {
       // A successful solve can carry an advisory note (Fable at 0% calibrates
       // the weekly limit fine, it just can't measure the Fable weight), and
       // treating that note as an error kept the dialog up on a good result.
+      // On success the note is left for the calibration row to show, so the
+      // caveat survives the dialog closing instead of vanishing with it.
       if (!isEstimated(res.pools.all.capacity)) {
-        if (res.calibrationNote) console.info('[claude-budget]', res.calibrationNote)
         $('setup').hidden = true
         return
       }
       return fail(
-        res.calibrationNote || 'Those readings could not be solved — check them against /usage.',
+        res.calibrationNote?.text || 'Those readings could not be solved — check them against /usage.',
         true,
       )
     } catch (e) {

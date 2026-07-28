@@ -116,16 +116,16 @@ export function solveFromObservations({
     return {
       error:
         otherUnits > 0 || fableUnits > 0
-          ? 'week reads 0% but usage was recorded — likely rounding; recalibrate once it shows 1% or more'
-          : 'week reads 0% with no usage yet — nothing to solve against; recalibrate once you have used some of the week',
+          ? 'Week reads 0% but usage was recorded — likely rounding. Recalibrate once it shows 1% or more.'
+          : 'Week reads 0% with no usage yet — nothing to solve against. Recalibrate once you have used some of the week.',
     }
   }
 
-  if (!(otherUnits > 0)) return { error: 'no non-Fable usage recorded this week yet' }
+  if (!(otherUnits > 0)) return { error: 'No non-Fable usage recorded this week yet, so the weekly limit could not be solved.' }
   if (denom <= 0) {
     // Fable would account for the entire week or more — inconsistent readings,
     // or every single request this week was Fable.
-    return { error: 'readings imply Fable is 100% of the week; check the numbers' }
+    return { error: 'Those readings imply Fable is 100% of the week. Check the numbers against /usage.' }
   }
   const weeklyUsd = otherUnits / denom
 
@@ -148,7 +148,7 @@ export function solveFromObservations({
   if (!(fableUnits > 0)) return { weeklyUsd, fableWeight: currentFableWeight, note: noFableInfo }
 
   const fableWeight = (f * fableShare * weeklyUsd) / fableUnits
-  if (!Number.isFinite(fableWeight) || fableWeight <= 0) return { error: 'could not solve Fable weight' }
+  if (!Number.isFinite(fableWeight) || fableWeight <= 0) return { error: 'Could not solve the Fable weight from those readings.' }
   return { weeklyUsd, fableWeight }
 }
 
