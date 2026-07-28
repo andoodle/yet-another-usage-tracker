@@ -13,9 +13,9 @@ server binds to `localhost` and only reads files you already have.
 > from local transcript data; it is not an official usage meter, and the numbers
 > are an approximation (see [Known limits](#known-limits)).
 
-macOS is the tested platform (the always-on installer is a LaunchAgent). The
-server and dashboard themselves are plain Node and should run anywhere Claude
-Code does; only `scripts/` is mac-specific.
+macOS and Windows both have always-on installers — a LaunchAgent on macOS, a
+built launcher exe plus a Startup-folder shortcut on Windows. The server and
+dashboard are plain Node and should run anywhere Claude Code does.
 
 ## Status
 
@@ -27,7 +27,8 @@ Code does; only `scripts/` is mac-specific.
 - [x] percentages — all display in % of weekly allowance (no API dollars)
 - [x] calibration — enter the % `/usage` shows, tool solves for the real limit
 - [x] 5-hour block — start inferred from transcript activity
-- [x] launchagent — always-on install script
+- [x] launchagent — always-on install script (macOS)
+- [x] windows launcher — built exe + Start Menu/Desktop/Startup shortcuts
 - [x] durable plan — atomic writes + serialized saves; settings survive concurrency
 - [x] cross-file dedup — warm and cold scans agree (was inflating toward 2x)
 - [x] setup gate — blocking dialog collects the reset window + both `/usage` readings first
@@ -65,8 +66,38 @@ scripts/make-desktop-shortcut.sh /Applications
 scripts/make-desktop-shortcut.sh --uninstall
 ```
 
+Always-on (recommended, Windows) — builds a small launcher exe, then adds
+Start Menu, Desktop, and Startup-folder shortcuts:
+
+```powershell
+.\scripts\install-windows.ps1
+.\scripts\install-windows.ps1 -NoAutostart     # shortcuts only, no login start
+.\scripts\install-windows.ps1 -Uninstall
+```
+
+Nothing is installed to build it. `csc.exe` (the C# compiler) ships inside
+Windows as part of the .NET Framework, and the icon is rendered by this repo's
+own `scripts/make-icon.mjs`. Node stays the only prerequisite.
+
+The exe is a ~10KB launcher, not a self-contained binary: it checks whether
+the port is already answering, spawns `node src/server.mjs` hidden if not
+(logging to `claude-budget.log`), waits for the port, then opens your browser.
+`--serve` skips the browser, which is what the Startup shortcut uses so login
+doesn't hand you a tab you didn't ask for. Launching it twice won't start a
+second server.
+
+> A [Node SEA](https://nodejs.org/api/single-executable-applications.html)
+> build would produce a true standalone exe, but at ~110MB, plus a bundler
+> dependency and a rewrite of the static-file serving to read from SEA assets.
+> Node is already required to run the server, so the thin launcher buys the
+> same double-clickability for 0.01% of the size and no source changes.
+
+Autostart is a Startup-folder shortcut rather than a Scheduled Task or a
+service, deliberately: this is a personal dashboard, not infrastructure. If
+you're not logged in, you're not coding, and there's nothing to pace.
+
 Manual, or as a fallback: `node src/server.mjs`, or double-click
-`Open Claude Budget.command`.
+`Open Claude Budget.command` (macOS).
 
 ## Why it works the way it does
 
@@ -182,6 +213,10 @@ Plan and cache live in `~/.claude/budget-data/` — deleting either is safe.
   de-duplicated at merge time over a sorted file walk, so warm and cold scans
   agree. A message with no id can't be identified across files and is always
   counted.
+- **Only this machine's transcripts are counted.** The allowance is per
+  account, but `~/.claude/projects/` is per machine. If you use Claude Code on
+  a laptop and a desktop, each one sees only its own share and both understate
+  the account-wide total. Treat the number as a floor, not a ledger.
 - Cache-write TTL is assumed 5m unless the transcript carries the newer
   `usage.cache_creation` breakdown, so 1h-TTL writes are under-weighted.
 - The weekly reset day/hour is a guess until you set it to match `/usage`.

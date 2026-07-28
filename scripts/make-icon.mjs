@@ -6,7 +6,9 @@
 import { deflateSync } from 'node:zlib'
 import { writeFileSync } from 'node:fs'
 
-const S = 1024
+// Square edge in pixels. Overridable so the Windows installer can render the
+// several sizes an .ico wants (16/32/48/256) from this same drawing code.
+const S = Number(process.argv[3]) || 1024
 const px = Buffer.alloc(S * S * 4) // RGBA
 
 const hex = (h) => [

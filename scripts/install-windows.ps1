@@ -1,0 +1,217 @@
+<#
+.SYNOPSIS
+    Builds ClaudeBudget.exe and wires up Start Menu / Desktop / autostart shortcuts.
+
+.DESCRIPTION
+    The Windows counterpart to install-launchagent.sh. Same job — make the
+    dashboard always available — with the pieces Windows actually has.
+
+    Installs nothing. The C# compiler used here (csc.exe) ships inside Windows
+    as part of the .NET Framework, and the icon is rendered by the repo's own
+    zero-dependency make-icon.mjs. Node is the only real prerequisite, and it
+    was already required to run the server.
+
+    Autostart is a Startup-folder shortcut rather than a Scheduled Task or a
+    service: this is a personal dashboard, not infrastructure. If you are not
+    logged in, you are not coding, and there is nothing for it to pace.
+
+.PARAMETER NoAutostart
+    Build the exe and the Start Menu / Desktop shortcuts, but do not start the
+    server at login.
+
+.PARAMETER Uninstall
+    Remove every shortcut this script created and the built exe. Never touches
+    ~/.claude/budget-data (your calibration) or the repo itself.
+
+.PARAMETER Port
+    Bake a non-default port into the shortcuts. Defaults to 4478, matching
+    BUDGET_PORT's default in src/server.mjs.
+
+.EXAMPLE
+    .\scripts\install-windows.ps1
+.EXAMPLE
+    .\scripts\install-windows.ps1 -NoAutostart -Port 5000
+.EXAMPLE
+    .\scripts\install-windows.ps1 -Uninstall
+#>
+
+[CmdletBinding()]
+param(
+    [switch]$NoAutostart,
+    [switch]$Uninstall,
+    [int]$Port = 4478
+)
+
+$ErrorActionPreference = 'Stop'
+
+$Root      = Split-Path -Parent $PSScriptRoot
+$WinDir    = Join-Path $Root 'windows'
+$BuildDir  = Join-Path $WinDir 'build'
+$ExePath   = Join-Path $WinDir 'ClaudeBudget.exe'
+$IcoPath   = Join-Path $BuildDir 'ClaudeBudget.ico'
+
+$StartMenu = Join-Path ([Environment]::GetFolderPath('Programs')) 'Claude Budget.lnk'
+$Desktop   = Join-Path ([Environment]::GetFolderPath('Desktop'))  'Claude Budget.lnk'
+$Startup   = Join-Path ([Environment]::GetFolderPath('Startup'))  'Claude Budget (server).lnk'
+
+function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
+function Write-Ok($msg)   { Write-Host "    $msg" -ForegroundColor DarkGray }
+
+# --- uninstall -------------------------------------------------------------
+
+if ($Uninstall) {
+    Write-Step 'Removing shortcuts and build output'
+    foreach ($p in @($StartMenu, $Desktop, $Startup, $ExePath)) {
+        if (Test-Path $p) {
+            Remove-Item $p -Force
+            Write-Ok "removed $p"
+        }
+    }
+    if (Test-Path $BuildDir) {
+        Remove-Item $BuildDir -Recurse -Force
+        Write-Ok "removed $BuildDir"
+    }
+    Write-Host ''
+    Write-Host 'Uninstalled. Your calibration in ~\.claude\budget-data was left alone.' -ForegroundColor Green
+    Write-Host 'A server already running was not stopped; close it from Task Manager (node.exe) if you want it gone now.'
+    return
+}
+
+# --- prerequisites ---------------------------------------------------------
+
+Write-Step 'Checking prerequisites'
+
+$node = (Get-Command node -ErrorAction SilentlyContinue).Source
+if (-not $node) {
+    throw 'Node.js was not found on PATH. Install Node 20 or newer from https://nodejs.org and re-run.'
+}
+$nodeMajor = [int](((& node --version) -replace '^v', '') -split '\.')[0]
+if ($nodeMajor -lt 20) {
+    throw "Node $nodeMajor found, but claude-budget needs Node 20 or newer."
+}
+Write-Ok "node $(& node --version) at $node"
+
+# csc.exe is part of the in-box .NET Framework. Prefer the 64-bit copy, but a
+# 32-bit-only machine compiles the same source just fine.
+$csc = @(
+    "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+    "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+if (-not $csc) {
+    throw 'csc.exe (.NET Framework 4.x compiler) was not found. It normally ships with Windows; enable the .NET Framework 4.x feature and re-run.'
+}
+Write-Ok "csc at $csc"
+
+if (-not (Test-Path (Join-Path $Root 'src\server.mjs'))) {
+    throw "This does not look like the claude-budget repo — no src\server.mjs under $Root"
+}
+
+New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+
+# --- icon ------------------------------------------------------------------
+
+Write-Step 'Rendering icon'
+
+$sizes = @(16, 32, 48, 256)
+$pngs = foreach ($s in $sizes) {
+    $png = Join-Path $BuildDir "icon-$s.png"
+    & node (Join-Path $Root 'scripts\make-icon.mjs') $png $s | Out-Null
+    $png
+}
+& node (Join-Path $Root 'windows\make-ico.mjs') $IcoPath @pngs | Out-Null
+Write-Ok "$IcoPath ($($sizes -join ', ') px)"
+
+# --- compile ---------------------------------------------------------------
+
+Write-Step 'Compiling ClaudeBudget.exe'
+
+# The launcher finds the repo by walking up from its own location, which keeps
+# working if the checkout is moved. This baked path is only the fallback for a
+# copy of the exe that has been carried somewhere else entirely.
+$bakedPath = Join-Path $BuildDir 'Baked.cs'
+$escaped = $Root -replace '\\', '\\'
+@"
+// GENERATED by scripts/install-windows.ps1 — do not edit, do not commit.
+static class Baked
+{
+    public const string Root = "$escaped";
+}
+"@ | Set-Content -Path $bakedPath -Encoding UTF8
+
+# /target:winexe = GUI subsystem, so no console window flashes on launch.
+$cscArgs = @(
+    '/nologo'
+    '/target:winexe'
+    '/optimize+'
+    "/out:$ExePath"
+    "/win32icon:$IcoPath"
+    '/reference:System.dll'
+    '/reference:System.Windows.Forms.dll'
+    (Join-Path $WinDir 'ClaudeBudget.cs')
+    $bakedPath
+)
+
+& $csc @cscArgs
+if ($LASTEXITCODE -ne 0) { throw "csc.exe failed with exit code $LASTEXITCODE" }
+Write-Ok "$ExePath ($([math]::Round((Get-Item $ExePath).Length / 1KB, 1)) KB)"
+
+# --- shortcuts -------------------------------------------------------------
+
+function New-Shortcut {
+    param(
+        [string]$Path,
+        [string]$Arguments = '',
+        [string]$Description
+    )
+    $shell = New-Object -ComObject WScript.Shell
+    $lnk = $shell.CreateShortcut($Path)
+    $lnk.TargetPath       = $ExePath
+    $lnk.Arguments        = $Arguments
+    $lnk.WorkingDirectory = $Root
+    $lnk.IconLocation     = $IcoPath
+    $lnk.Description      = $Description
+    $lnk.Save()
+    [Runtime.InteropServices.Marshal]::ReleaseComObject($shell) | Out-Null
+}
+
+Write-Step 'Creating shortcuts'
+
+New-Shortcut -Path $StartMenu -Description 'Open the Claude Budget dashboard'
+Write-Ok 'Start Menu'
+
+New-Shortcut -Path $Desktop -Description 'Open the Claude Budget dashboard'
+Write-Ok 'Desktop'
+
+if ($NoAutostart) {
+    if (Test-Path $Startup) {
+        Remove-Item $Startup -Force
+        Write-Ok 'autostart removed (-NoAutostart)'
+    } else {
+        Write-Ok 'autostart skipped (-NoAutostart)'
+    }
+} else {
+    # --serve starts the server without opening a browser. Logging in should
+    # not hand you a tab you did not ask for.
+    New-Shortcut -Path $Startup -Arguments '--serve' -Description 'Start the Claude Budget server at login'
+    Write-Ok 'Startup folder (server only, no browser)'
+}
+
+# --- done ------------------------------------------------------------------
+
+$url = "http://localhost:$Port/"
+
+Write-Host ''
+Write-Host 'Installed.' -ForegroundColor Green
+Write-Host ''
+Write-Host "  exe        $ExePath"
+Write-Host "  dashboard  $url"
+Write-Host "  log        $(Join-Path $Root 'claude-budget.log')"
+Write-Host "  autostart  $(if ($NoAutostart) { 'off' } else { 'on (Startup folder)' })"
+Write-Host ''
+if ($Port -ne 4478) {
+    Write-Host "Port $Port is not the default. Set BUDGET_PORT=$Port in your user environment" -ForegroundColor Yellow
+    Write-Host 'so the launcher and the server agree on it across reboots.' -ForegroundColor Yellow
+    Write-Host ''
+}
+Write-Host 'Run .\scripts\install-windows.ps1 -Uninstall to remove the shortcuts and exe.'

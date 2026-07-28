@@ -1,3 +1,10 @@
 node_modules/
 .DS_Store
 .claude/session-recaps/
+
+# Windows launcher build output (see scripts/install-windows.ps1). The .cs
+# source is tracked; the compiled exe, the rendered icon, and the generated
+# Baked.cs are all per-machine and rebuilt by the installer.
+windows/build/
+windows/ClaudeBudget.exe
+claude-budget.log
