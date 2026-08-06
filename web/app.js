@@ -2,6 +2,8 @@ const $ = (id) => document.getElementById(id)
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MAX_WEIGHT = 2
 const STEP = 0.1
+// Height of a full 24h day card; partial boundary days scale down from this.
+const TRACK_PX = 280
 
 let all = null // full API payload: { pools, poolMeta, plan, fileCount }
 let state = null // the currently selected pool's view
@@ -388,6 +390,7 @@ function syncWeekDom() {
   if (host.dataset.key === wanted) return
   host.dataset.key = wanted
   host.textContent = ''
+  host.style.setProperty('--cols', state.perDay.length)
   cells.clear()
 
   for (const day of state.perDay) {
@@ -422,7 +425,11 @@ function syncWeekDom() {
     host.append(el)
     cells.set(day.date, { el, track, avail, spent, name, amt, label })
 
-    if (!day.isPast) attachDrag(track, day.date)
+    // Past days are adjustable too — raising a day you overspent is a
+    // deliberate re-plan: its baseline grows, the measured debt shrinks, and
+    // the remaining days' shares tighten to keep the week at 100%. The dimmed
+    // rendering still marks it as history.
+    attachDrag(track, day.date)
   }
 }
 
@@ -437,7 +444,8 @@ function paintWeek() {
     // baseline they were originally given — otherwise an overspent Tuesday
     // renders the same colour as a day that stayed within its share.
     const ref = day.planned ?? day.baseline
-    const over = ref > 0 && day.spent > ref
+    // Any spend on a zero-share (away) day is over by definition.
+    const over = ref > 0 ? day.spent > ref : day.spent > 0
 
     c.el.className =
       'day' +
@@ -446,19 +454,37 @@ function paintWeek() {
       (!day.isPast && weight === 0 ? ' away' : '') +
       (dragging?.date === day.date ? ' dragging' : '')
 
-    // Wide translucent fill = availability. This is what the drag manipulates,
-    // so the gesture has a direct 1:1 visual it controls.
-    c.avail.style.height = day.isPast ? '0%' : `${(weight / MAX_WEIGHT) * 100}%`
+    // Card height is proportional to the hours the day has inside the window —
+    // the boxes read as a day-granular time axis. The first day lost its
+    // morning, so it shrinks from the top (bottom edge stays on the shared
+    // baseline, which is the grid's natural end-alignment); the last day loses
+    // its evening, so it shrinks from the bottom (a margin below re-anchors its
+    // top edge to the full-day line while the name labels stay in their row).
+    const frac = day.frac ?? 1
+    c.track.style.height = `${frac * TRACK_PX}px`
+    c.track.style.marginBottom = day.clip === 'bottom' ? `${(1 - frac) * TRACK_PX}px` : ''
 
-    // Narrow solid bar = usage, measured against that day's own allocation.
-    const frac = ref > 0 ? Math.min(1.15, day.spent / ref) : 0
-    c.spent.style.height = `${frac * 100}%`
+    // Wide translucent fill = availability. This is what the drag manipulates,
+    // so the gesture has a direct 1:1 visual it controls. Past days keep their
+    // fill (dimmed by .past) — it's the reference the usage bar is read against.
+    // Because fill height scales with the card and the card scales with hours,
+    // fill AREA is proportional to the day's share of the week.
+    const availH = (weight / MAX_WEIGHT) * 100
+    c.avail.style.height = `${availH}%`
+
+    // Narrow solid bar = usage, on the SAME scale as the fill: the fill's top
+    // edge is 100% of that day's share, so a bar poking above the shading
+    // reads as over-share at a glance. Zero-share day with spend gets a small
+    // red stub — there is no scale to draw it on, only the fact of the spend.
+    const barH = ref > 0 ? Math.min(100, (day.spent / ref) * availH) : day.spent > 0 ? 12 : 0
+    c.spent.style.height = `${barH}%`
     c.spent.classList.toggle('over', over)
 
-    c.label.textContent = day.isPast ? '' : levelName(weight)
-    c.amt.textContent = day.isPast
-      ? pct(day.spent)
-      : `${pct(day.spent)} / ${day.planned == null ? '—' : pct(day.planned)}`
+    // A stub card (e.g. a 6-hour reset day) has no headroom for the caption.
+    c.label.textContent = frac < 0.5 ? '' : levelName(weight)
+    // Past days show spent against their baseline share, which is still
+    // adjustable — re-planning a day you overspent recomputes the debt.
+    c.amt.textContent = `${pct(day.spent)} / ${ref == null ? '—' : pct(ref)}`
   }
 }
 
@@ -527,19 +553,6 @@ function attachDrag(track, date) {
 
     paintWeek()
   })
-
-  // Wheel over a column nudges it — easier than dragging for small tweaks.
-  track.addEventListener(
-    'wheel',
-    (e) => {
-      e.preventDefault()
-      const day = current()
-      if (!day) return
-      const w = Math.max(0, Math.min(MAX_WEIGHT, day.weight + (e.deltaY < 0 ? STEP : -STEP)))
-      patchPlan({ dayOverrides: { ...state.plan.dayOverrides, [date]: Number(w.toFixed(2)) } })
-    },
-    { passive: false },
-  )
 
   // Double-click clears the override back to the weekday default.
   track.addEventListener('dblclick', () => {

@@ -23,7 +23,9 @@ body {
 }
 
 main {
-  max-width: 940px;
+  /* Wide enough for the planner's 8 day columns (a mid-day reset splits the
+     boundary weekday across two cards) to sit on one row. */
+  max-width: 1160px;
   margin: 0 auto;
   padding: 40px 24px 80px;
 }
@@ -179,9 +181,15 @@ input[type="range"] { accent-color: var(--accent); width: 120px; }
 
 .week {
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  /* --cols is set from JS to the actual card count (7, or 8 when a mid-day
+     reset splits the boundary weekday across two cards). */
+  grid-template-columns: repeat(var(--cols, 7), 1fr);
   gap: 8px;
   align-items: end;
+}
+/* Too narrow for one row — wrap into two rows of four instead of crushing. */
+@media (max-width: 860px) {
+  .week { grid-template-columns: repeat(4, 1fr); }
 }
 
 .day {
@@ -194,7 +202,10 @@ input[type="range"] { accent-color: var(--accent); width: 120px; }
 
 .day .track {
   position: relative;
-  height: 190px;
+  /* Full-24h-day height (TRACK_PX in app.js). Boundary days get an inline
+     height proportional to their in-window hours — the cards form a
+     day-granular time axis, so keep this and TRACK_PX in sync. */
+  height: 280px;
   background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -202,7 +213,9 @@ input[type="range"] { accent-color: var(--accent); width: 120px; }
   cursor: ns-resize;
   touch-action: none; /* let the drag own vertical gestures */
 }
-.day.past .track { cursor: default; opacity: 0.55; }
+/* Past days stay draggable (re-planning an overspent day is legitimate);
+   the dimming alone marks them as history. */
+.day.past .track { opacity: 0.55; }
 .day.today .track { border-color: var(--accent); }
 .day.dragging .track { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(216, 166, 87, 0.18); }
 
@@ -216,7 +229,8 @@ input[type="range"] { accent-color: var(--accent); width: 120px; }
 }
 .day.dragging .avail { transition: none; }
 
-/* Narrow solid bar = usage, measured against that day's own allocation. */
+/* Narrow solid bar = usage, on the same scale as the availability fill:
+   reaching the fill's top edge = that day's share fully used. */
 .track .spent-bar {
   position: absolute;
   left: 50%;

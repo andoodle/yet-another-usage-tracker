@@ -373,6 +373,51 @@ export function allocate({ capacity, plan, days, spentByDay, todayKey }) {
   }
 }
 
+/**
+ * Spend mass per local hour-of-day (0–23) over recent history. This is the
+ * user's actual daily rhythm — evenings heavy, 4am silent — used to pace
+ * "where should I be by now" instead of assuming spend is linear across the day.
+ */
+function hourProfile(buckets, now, pool, fw, lookbackDays = 28) {
+  const from = now.getTime() - lookbackDays * DAY
+  const prof = new Array(24).fill(0)
+  let total = 0
+  for (const [key, b] of Object.entries(buckets)) {
+    const t = hourKeyToDate(key)
+    if (t.getTime() < from || t > now) continue
+    const c = bucketCost(b, pool, fw)
+    prof[t.getHours()] += c
+    total += c
+  }
+  return { prof, total }
+}
+
+/**
+ * Fraction of the span's expected spend that should have happened by `now`,
+ * weighting each hour by the historical profile. A uniform floor (10% of the
+ * mean hourly mass) keeps one historically-quiet hour from pinning the
+ * expectation at zero while you're actively coding in it. Falls back to
+ * linear time when there is no history at all.
+ */
+function paceFrac(profile, spanStart, spanEnd, nowMs) {
+  if (spanEnd <= spanStart) return 1
+  const linear = Math.max(0, Math.min(1, (nowMs - spanStart) / (spanEnd - spanStart)))
+  if (!(profile.total > 0)) return linear
+  const floor = (profile.total / 24) * 0.1
+  let total = 0
+  let elapsed = 0
+  for (let t = Math.floor(spanStart / HOUR) * HOUR; t < spanEnd; t += HOUR) {
+    const hStart = Math.max(t, spanStart)
+    const hEnd = Math.min(t + HOUR, spanEnd)
+    if (hEnd <= hStart) continue
+    const mass = (profile.prof[new Date(t).getHours()] + floor) * ((hEnd - hStart) / HOUR)
+    total += mass
+    const done = Math.max(0, Math.min(hEnd, nowMs) - hStart)
+    elapsed += mass * (done / (hEnd - hStart))
+  }
+  return total > 0 ? Math.max(0, Math.min(1, elapsed / total)) : linear
+}
+
 /** Build the full dashboard state. */
 // Default pool is 'all'. It was left as the long-removed 'standard' after the
 // pool rename, which silently produced zero for every total — bucket lookups
@@ -430,13 +475,27 @@ export function computeState({ buckets, limitEvents, plan, pool = 'all', now = n
   const todayStart = new Date(now)
   todayStart.setHours(0, 0, 0, 0)
   const todayKey = dateKey(todayStart)
-  const spentToday = costBetween(buckets, todayStart, now, pool, fw)
+  // On the reset day, spend before the reset belongs to the PREVIOUS window —
+  // clamp to the window start so "today" agrees with the calendar card.
+  const spentToday = costBetween(
+    buckets,
+    todayStart > start ? todayStart : start,
+    now,
+    pool,
+    fw,
+  )
   const totals = dailyTotals(buckets, start, end, pool, fw)
 
   // Every calendar day the window touches. A mid-day reset anchor (e.g. Wed
-  // 15:45) makes the first and last days PARTIAL, so each day's effective
+  // 18:00) makes the first and last days PARTIAL, so each day's effective
   // weight is scaled by how much of it actually falls inside the window.
   // Those two fractions sum to 1, so the week still totals seven days.
+  //
+  // The UI draws each card's height proportional to `frac` — the boxes form a
+  // day-granular time axis, so a 6-hour reset-day stub visibly IS a quarter
+  // day, which is what makes its quarter-size share legible. `clip` says which
+  // edge the missing hours came off: the first day lost its morning ('top'),
+  // the last day loses its evening ('bottom').
   const days = []
   const wc = new Date(start)
   wc.setHours(0, 0, 0, 0)
@@ -445,16 +504,20 @@ export function computeState({ buckets, limitEvents, plan, pool = 'all', now = n
     const dayEnd = new Date(wc.getTime() + DAY)
     const overlap =
       (Math.min(dayEnd.getTime(), end.getTime()) - Math.max(dayStart.getTime(), start.getTime())) / DAY
+    const frac = Math.max(0, Math.min(1, overlap))
     const weight = weightFor(plan, wc)
     days.push({
       date: dateKey(wc),
       dow: wc.getDay(),
       weight, // what the user set — drives the drag UI
       partial: overlap < 0.999,
-      effWeight: weight * Math.max(0, Math.min(1, overlap)), // what allocation uses
+      frac, // in-window fraction of the day — drives card height
+      effWeight: weight * frac, // what allocation uses
     })
     wc.setDate(wc.getDate() + 1)
   }
+  if (days.length && days[0].partial) days[0].clip = 'top'
+  if (days.length && days[days.length - 1].partial) days[days.length - 1].clip = 'bottom'
 
   const alloc =
     capacity.weeklyUsd == null
@@ -475,7 +538,15 @@ export function computeState({ buckets, limitEvents, plan, pool = 'all', now = n
   // Where the plan says you *should* be by this moment: every past day's
   // baseline in full, plus the elapsed fraction of today's. Lets the weekly
   // gauge say "ahead/behind pace" rather than just "87% gone".
-  const dayFrac = Math.min(1, (now - todayStart) / DAY)
+  // Today's fraction is measured over its IN-WINDOW span, not the clock day:
+  // on the reset day the session starts at the reset (e.g. 18:00), and on the
+  // closing day it ends there — a full-weight partial day paces across the
+  // hours it actually has. Within that span, hours are weighted by the user's
+  // own historical hour-of-day rhythm rather than assumed uniform.
+  const todayEnd = new Date(todayStart.getTime() + DAY)
+  const spanStart = Math.max(todayStart.getTime(), start.getTime())
+  const spanEnd = Math.min(todayEnd.getTime(), end.getTime())
+  const dayFrac = paceFrac(hourProfile(buckets, now, pool, fw), spanStart, spanEnd, now.getTime())
   const baselinePast = perDay
     .filter((d) => d.isPast)
     .reduce((a, d) => a + (d.baseline || 0), 0)
